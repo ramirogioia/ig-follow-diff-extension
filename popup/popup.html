@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>IG Follow Diff</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <div class="wrap">
+      <header class="head">
+        <div class="title">
+          <div class="name">IG Follow Diff</div>
+          <div class="sub" id="statusText">Listo</div>
+        </div>
+        <div class="actions">
+          <button id="scanBtn" class="btn primary">Escanear</button>
+          <button id="stopBtn" class="btn">Stop</button>
+        </div>
+      </header>
+
+      <section class="progress">
+        <div class="progress-row">
+          <div class="progress-label" id="progressLabel">—</div>
+          <div class="progress-pct" id="progressPct">0%</div>
+        </div>
+        <div class="bar">
+          <div class="bar-fill" id="barFill" style="width: 0%"></div>
+        </div>
+      </section>
+
+      <nav class="tabs">
+        <button class="tab active" data-tab="report">Reporte</button>
+        <button class="tab" data-tab="logs">Logs</button>
+      </nav>
+
+      <main class="main">
+        <section id="report" class="panel active">
+          <div class="summary">
+            <div class="chip">
+              <div class="chip-k">Yo sigo y no me siguen</div>
+              <div class="chip-v" id="countNoMeSiguen">0</div>
+            </div>
+            <div class="chip">
+              <div class="chip-k">Me siguen y no los sigo</div>
+              <div class="chip-v" id="countNoSigoYo">0</div>
+            </div>
+          </div>
+
+          <div class="list-head">
+            <div class="list-title">No me siguen</div>
+            <div class="list-actions">
+              <button id="refreshBtn" class="btn small">Refrescar</button>
+              <button id="copyBtn" class="btn small">Copiar</button>
+              <button id="clearBtn" class="btn small danger">Limpiar</button>
+            </div>
+          </div>
+
+          <div class="hint" id="hint">
+            Abriremos una ventana de Instagram a la derecha. <b>No la minimices</b> mientras corre.
+          </div>
+
+          <div class="list" id="noMeSiguenList"></div>
+        </section>
+
+        <section id="logs" class="panel">
+          <div class="list-head">
+            <div class="list-title">Logs</div>
+            <div class="list-actions">
+              <button id="logsCopyBtn" class="btn small">Copiar</button>
+              <button id="logsClearBtn" class="btn small danger">Limpiar</button>
+            </div>
+          </div>
+          <pre class="logs" id="logsBox"></pre>
+        </section>
+      </main>
+
+      <footer class="foot">
+        <button id="closeWorkerBtn" class="btn small">Cerrar ventana worker</button>
+      </footer>
+    </div>
+
+    <script src="popup.js"></script>
+  </body>
+</html>
