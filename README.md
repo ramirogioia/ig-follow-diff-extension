@@ -1,0 +1,1 @@
+# ig-follow-diff-extension
