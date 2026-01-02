@@ -17,7 +17,7 @@ const DEFAULT_STATE = {
   originalBounds: null,
   originalWindowState: null,
   progress: { phase: "", loaded: 0, total: 0, percent: 0 },
-  unfollow: { running: false, username: null },
+  profileHref: null,
 };
 
 let state = { ...DEFAULT_STATE };
@@ -234,8 +234,18 @@ async function startScanDocked() {
   });
 
   // worker a la derecha
+  let workerUrl = "https://www.instagram.com/";
+  if (state.profileHref) {
+    const clean = state.profileHref.startsWith("https://")
+      ? state.profileHref
+      : `https://www.instagram.com${state.profileHref}`;
+    workerUrl = clean;
+  } else if (activeTab.url && activeTab.url.startsWith("https://www.instagram.com/")) {
+    workerUrl = activeTab.url;
+  }
+
   const workerWin = await chrome.windows.create({
-    url: "https://www.instagram.com/",
+    url: workerUrl,
     type: "normal",
     focused: false,
     left: dock.worker.left,
@@ -263,7 +273,7 @@ async function startScanDocked() {
   const ready = await ensureContentReady(workerTabId, 25000);
   if (!ready) throw new Error("No pude comunicarme con el content script del tab worker.");
 
-  // Esperar un poco más para que la página esté completamente cargada
+  // Esperar para que Instagram cargue completamente
   await new Promise((r) => setTimeout(r, 1000));
 
   await setState({
@@ -288,22 +298,6 @@ async function stopAll() {
     } catch (_) {}
   }
   await setState({ status: "idle", text: "Detenido." });
-}
-
-async function unfollowOne(username) {
-  await loadState();
-  if (!state.workerTabId) throw new Error("No hay worker.");
-  if (!username) throw new Error("Username vacío.");
-
-  await setState({
-    status: "unfollowing",
-    text: `Dejando de seguir @${username}...`,
-    unfollow: { running: true, username },
-  });
-
-  log("INFO", "unfollowOne()", { tabId: state.workerTabId, username });
-
-  await sendToTab(state.workerTabId, { type: "UNFOLLOW_ONE", username });
 }
 
 chrome.runtime.onInstalled.addListener(async () => {
@@ -342,8 +336,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         return;
       }
 
-      if (msg.type === "BG_UNFOLLOW_ONE") {
-        await unfollowOne(msg.username);
+      if (msg.type === "PROFILE_HREF") {
+        await setState({ profileHref: msg.href || null });
         sendResponse({ ok: true });
         return;
       }
@@ -392,7 +386,6 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           status: "done",
           text: "Listo.",
           lastResult: msg.result || null,
-          unfollow: { running: false, username: null },
         });
 
         log("INFO", "RESULT recibido", {
@@ -406,13 +399,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       }
 
       if (msg.type === "UNFOLLOW_DONE") {
-        await setState({
-          status: "done",
-          text: `Dejaste de seguir @${msg.username}`,
-          unfollow: { running: false, username: null },
-        });
-
-        log("INFO", "UNFOLLOW_DONE", { username: msg.username });
+        // Unfollow flow removed in this version
         sendResponse({ ok: true });
         return;
       }
@@ -421,7 +408,6 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         await setState({
           status: "error",
           text: msg.message || "Error",
-          unfollow: { running: false, username: null },
         });
 
         log("ERROR", "ERROR desde content", { message: msg.message, tabId: sender?.tab?.id });

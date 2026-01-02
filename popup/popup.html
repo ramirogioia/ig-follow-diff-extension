@@ -10,11 +10,11 @@
     <div class="wrap">
       <header class="head">
         <div class="title">
-          <div class="name">IG Follow Diff</div>
-          <div class="sub" id="statusText">Listo</div>
+          <div class="name">G-Follow Inspector</div>
+          <div class="sub" id="statusText">Ready</div>
         </div>
         <div class="actions">
-          <button id="scanBtn" class="btn primary">Escanear</button>
+          <button id="scanBtn" class="btn primary">Scan</button>
           <button id="stopBtn" class="btn">Stop</button>
         </div>
       </header>
@@ -29,41 +29,43 @@
         </div>
       </section>
 
-      <nav class="tabs">
-        <button class="tab active" data-tab="report">Reporte</button>
-        <button class="tab" data-tab="logs">Logs</button>
+      <nav class="tabs" style="display:none;">
+        <button class="tab active" data-tab="report">Report</button>
+        <button class="tab" data-tab="logs" style="display:none;">Logs</button>
       </nav>
 
       <main class="main">
         <section id="report" class="panel active">
+          <div class="disclaimer">Not affiliated with Instagram or Meta.</div>
+
           <div class="summary">
-            <div class="chip">
-              <div class="chip-k">Yo sigo y no me siguen</div>
+            <div class="chip active" id="chip-noMeSiguen" role="button">
+              <div class="chip-k">I follow, they don’t</div>
               <div class="chip-v" id="countNoMeSiguen">0</div>
             </div>
-            <div class="chip">
-              <div class="chip-k">Me siguen y no los sigo</div>
+            <div class="chip" id="chip-noSigoYo" role="button">
+              <div class="chip-k">They follow, I don’t</div>
               <div class="chip-v" id="countNoSigoYo">0</div>
             </div>
           </div>
 
           <div class="list-head">
-            <div class="list-title">No me siguen</div>
+            <div class="list-title" id="listTitle">They don’t follow me</div>
             <div class="list-actions">
-              <button id="refreshBtn" class="btn small">Refrescar</button>
-              <button id="copyBtn" class="btn small">Copiar</button>
-              <button id="clearBtn" class="btn small danger">Limpiar</button>
+              <button id="refreshBtn" class="btn small">Refresh</button>
+              <button id="copyBtn" class="btn small">Copy</button>
+              <button id="clearBtn" class="btn small danger">Clear</button>
             </div>
           </div>
 
           <div class="hint" id="hint">
-            Abriremos una ventana de Instagram a la derecha. <b>No la minimices</b> mientras corre.
+            We will open an Instagram window on the right. <b>Do not minimize it</b> while it runs. The report is shown here in the popup.
           </div>
 
           <div class="list" id="noMeSiguenList"></div>
         </section>
 
-        <section id="logs" class="panel">
+        <section id="logs" class="panel" style="display:none;">
           <div class="list-head">
             <div class="list-title">Logs</div>
             <div class="list-actions">
@@ -76,7 +78,7 @@
       </main>
 
       <footer class="foot">
-        <button id="closeWorkerBtn" class="btn small">Cerrar ventana worker</button>
+        <button id="closeWorkerBtn" class="btn small">Close worker window</button>
       </footer>
     </div>
 

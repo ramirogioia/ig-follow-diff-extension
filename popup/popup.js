@@ -11,6 +11,9 @@ const barFill = $("barFill");
 const countNoMeSiguen = $("countNoMeSiguen");
 const countNoSigoYo = $("countNoSigoYo");
 const noMeSiguenList = $("noMeSiguenList");
+const listTitle = $("listTitle");
+const chipNoMeSiguen = $("chip-noMeSiguen");
+const chipNoSigoYo = $("chip-noSigoYo");
 
 const refreshBtn = $("refreshBtn");
 const copyBtn = $("copyBtn");
@@ -23,6 +26,7 @@ const logsClearBtn = $("logsClearBtn");
 const closeWorkerBtn = $("closeWorkerBtn");
 
 let currentState = null;
+let currentListType = "noMeSiguen"; // noMeSiguen | noSigoYo
 
 function fmtLine(l) {
   const d = l.data ? "  " + JSON.stringify(l.data) : "";
@@ -52,40 +56,43 @@ function setProgressUI(st) {
 
 function setStatusUI(st) {
   const s = st?.status || "idle";
-  const txt = st?.text || (s === "idle" ? "Listo" : s);
+  const txt = st?.text || (s === "idle" ? "Ready" : s);
   statusText.textContent = txt;
 
-  const unf = st?.unfollow?.running;
-  const running = s === "running" || unf || s === "unfollowing";
+  const running = s === "running";
 
   scanBtn.disabled = running;
   stopBtn.disabled = !running;
-
-  // bloquear clicks durante unfollow
-  const disableAllUnfollow = Boolean(unf);
-  const btns = document.querySelectorAll("[data-unfollow]");
-  btns.forEach((b) => (b.disabled = disableAllUnfollow));
 }
 
 function renderReport(st) {
   const r = st?.lastResult;
   const noMeSiguen = r?.noMeSiguen || [];
   const noSigoYo = r?.noSigoYo || [];
+  const hint = $("hint");
+
+  if (hint) {
+    hint.style.display = r ? "none" : "block";
+  }
 
   countNoMeSiguen.textContent = String(noMeSiguen.length);
   countNoSigoYo.textContent = String(noSigoYo.length);
 
   noMeSiguenList.innerHTML = "";
 
-  if (!noMeSiguen.length) {
+  const list = currentListType === "noSigoYo" ? noSigoYo : noMeSiguen;
+  const titleText = currentListType === "noSigoYo" ? "They follow, I don’t" : "They don’t follow me";
+  if (listTitle) listTitle.textContent = titleText;
+
+  if (!list.length) {
     const empty = document.createElement("div");
     empty.className = "hint";
-    empty.textContent = "Todavía no hay resultados. Tocá Escanear.";
+    empty.textContent = "No results yet. Click Scan. The report is shown here in the popup.";
     noMeSiguenList.appendChild(empty);
     return;
   }
 
-  for (const u of noMeSiguen) {
+  for (const u of list) {
     const row = document.createElement("div");
     row.className = "item";
 
@@ -105,38 +112,17 @@ function renderReport(st) {
 
     const badge = document.createElement("span");
     badge.className = "badge";
-    badge.textContent = "Listo";
+    badge.textContent = "Ready";
 
     const open = document.createElement("button");
     open.className = "btn small";
-    open.textContent = "Abrir";
+    open.textContent = "Open";
     open.addEventListener("click", () => {
       chrome.tabs.create({ url: `https://www.instagram.com/${u}/` });
     });
 
-    const unf = document.createElement("button");
-    unf.className = "btn small danger";
-    unf.textContent = "Unfollow";
-    unf.setAttribute("data-unfollow", "1");
-    unf.addEventListener("click", async () => {
-      // bloquear todos los demás mientras corre
-      document.querySelectorAll("[data-unfollow]").forEach((b) => (b.disabled = true));
-      badge.textContent = "Procesando...";
-      try {
-        await new Promise((resolve, reject) => {
-          chrome.runtime.sendMessage({ type: "BG_UNFOLLOW_ONE", username: u }, (res) => {
-            if (res?.ok) resolve(true);
-            else reject(new Error(res?.error || "Error"));
-          });
-        });
-      } catch (e) {
-        badge.textContent = "Error";
-      }
-    });
-
     right.appendChild(badge);
     right.appendChild(open);
-    right.appendChild(unf);
 
     row.appendChild(left);
     row.appendChild(right);
@@ -169,6 +155,22 @@ function setupTabs() {
       document.getElementById(id).classList.add("active");
     });
   });
+}
+
+function setupChips() {
+  const activate = (type) => {
+    currentListType = type;
+    if (chipNoMeSiguen) chipNoMeSiguen.classList.toggle("active", type === "noMeSiguen");
+    if (chipNoSigoYo) chipNoSigoYo.classList.toggle("active", type === "noSigoYo");
+    renderReport(currentState);
+  };
+  if (chipNoMeSiguen) {
+    chipNoMeSiguen.addEventListener("click", () => activate("noMeSiguen"));
+  }
+  if (chipNoSigoYo) {
+    chipNoSigoYo.addEventListener("click", () => activate("noSigoYo"));
+  }
+  activate("noMeSiguen");
 }
 
 scanBtn.addEventListener("click", async () => {
@@ -219,6 +221,7 @@ closeWorkerBtn.addEventListener("click", async () => {
 });
 
 setupTabs();
+setupChips();
 refreshAll();
 
 // auto-refresh mientras está abierto
