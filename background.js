@@ -234,12 +234,27 @@ async function startScanDocked() {
   });
 
   // worker a la derecha
+  // detectar perfil actual desde la pestaña activa (primer segmento no blacklist)
+  let detectedProfile = null;
+  if (activeTab.url && activeTab.url.startsWith("https://www.instagram.com/")) {
+    try {
+      const u = new URL(activeTab.url);
+      const parts = u.pathname.split("/").filter(Boolean);
+      const first = parts[0];
+      const BLACK = new Set(["accounts", "explore", "reels", "direct", "notifications", "stories", "p", "tv"]);
+      if (first && !BLACK.has(first.toLowerCase())) {
+        detectedProfile = `/${first}/`;
+      }
+    } catch (_) {}
+  }
+  if (detectedProfile) {
+    await setState({ profileHref: detectedProfile });
+  }
+
   let workerUrl = "https://www.instagram.com/";
-  if (state.profileHref) {
-    const clean = state.profileHref.startsWith("https://")
-      ? state.profileHref
-      : `https://www.instagram.com${state.profileHref}`;
-    workerUrl = clean;
+  const href = state.profileHref || detectedProfile;
+  if (href) {
+    workerUrl = href.startsWith("https://") ? href : `https://www.instagram.com${href}`;
   } else if (activeTab.url && activeTab.url.startsWith("https://www.instagram.com/")) {
     workerUrl = activeTab.url;
   }
