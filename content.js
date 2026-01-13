@@ -476,7 +476,7 @@ async function waitForDialog() {
     if (dialogs.length) return dialogs[dialogs.length - 1]; // último abierto
     await sleep(250);
   }
-  throw new Error("No se abrió el modal a tiempo.");
+  throw new Error("The modal did not open in time.");
 }
 
 async function waitForDialogContent(dialog, type) {
@@ -596,12 +596,12 @@ async function waitForBox(dialog, type) {
       return { box, scrollable };
     }
 
-    sendLog("DEBUG", `Esperando box (${type})`, { i });
+    sendLog("DEBUG", `Waiting for box (${type})`, { i });
     await sleep(500); // 500ms como en la versión que funcionaba
   }
 
   // Fallback sin scroll: usar el dialog completo para parsear
-  sendLog("WARN", `No encontré contenedor scrollable (${type}), usando dialog completo`, {});
+  sendLog("WARN", `Scrollable container not found (${type}), using full dialog`, {});
   return { box: dialog, scrollable: false, fallback: true };
 }
 
@@ -663,7 +663,7 @@ function parseUsersFromDialog(dialog, opts = { allowTextFallback: true }) {
 
   // Fallback textual parsing cuando no hay anchors (listas cortas sin links)
   if (opts.allowTextFallback && ordered.length === 0 && anchors.length === 0) {
-    const text = (dialog.innerText || "").split(/\s+/);
+  const text = (dialog.innerText || "").split(/\s+/);
     for (const t of text) {
       const cleaned = t.replace(/^@/, "").replace(/[^A-Za-z0-9._]/g, "");
       if (!cleaned) continue;
@@ -770,12 +770,12 @@ async function openModal(type, hrefPart) {
     throw new Error(`No se encontró el enlace de ${type} o no está visible`);
   }
 
-  sendLog("INFO", `Abriendo modal ${type}`, { hrefPart, url: location.href });
+  sendLog("INFO", `Opening modal ${type}`, { hrefPart, url: location.href });
   reactClick(btn);
 
   const dialog = await waitForDialog();
   // Espera base más larga para que Instagram cargue el contenido inicial (como en la versión que funcionaba)
-  sendLog("INFO", `Esperando carga inicial de ${type}...`, {});
+  sendLog("INFO", `Waiting initial load of ${type}...`, {});
   await sleep(1500);
   await waitForDialogContent(dialog, type);
   return dialog;
@@ -792,7 +792,7 @@ async function scrollCollect(type, hrefPart, retrying = false) {
 
   const total = Number.isFinite(totalGuess) ? totalGuess : 0;
 
-  sendProgress({ phase: type, loaded: 0, total, percent: 0, text: `Recolectando ${type}... 0%` });
+  sendProgress({ phase: type, loaded: 0, total, percent: 0, text: `Collecting ${type}... 0%` });
 
   let { box, scrollable } = await waitForBox(dialog, type);
 
@@ -804,7 +804,7 @@ async function scrollCollect(type, hrefPart, retrying = false) {
     } catch (_) {}
     const snap = debugDialogSnapshot(box, type);
     if (!retrying && snap && snap.anchorsCount === 0 && snap.textLen < 20 && total > 0) {
-      sendLog("WARN", `Snapshot empty, reopening modal (${type})`, { total });
+    sendLog("WARN", `Snapshot empty, reopening modal (${type})`, { total });
       await closeDialog();
       await sleep(600);
       return await scrollCollect(type, hrefPart, true);
@@ -822,7 +822,7 @@ async function scrollCollect(type, hrefPart, retrying = false) {
       await sleep(800);
       return await scrollCollect(type, hrefPart, true);
     }
-    sendLog("INFO", `Sin scroll (${type}) - lista completa`, { count: finalUsers.length, total });
+    sendLog("INFO", `No scroll (${type}) - full list`, { count: finalUsers.length, total });
     await closeDialog();
     await sleep(650);
     return finalUsers;
@@ -830,7 +830,7 @@ async function scrollCollect(type, hrefPart, retrying = false) {
 
   await kickstartScrollable(box);
 
-  sendLog("INFO", `Scrolleando ${type}...`, {});
+  sendLog("INFO", `Scrolling ${type}...`, {});
   let prevHeight = box.scrollHeight;
   let stable = 0;
   let lastLoaded = 0;
@@ -840,13 +840,13 @@ async function scrollCollect(type, hrefPart, retrying = false) {
     if (STOP) throw new Error("STOP");
 
     if (!box.isConnected || box.clientHeight === 0) {
-      sendLog("WARN", "box murió, re-buscando...", { isConnected: box.isConnected, clientHeight: box.clientHeight });
+    sendLog("WARN", "Scroll box disappeared, searching again...", { isConnected: box.isConnected, clientHeight: box.clientHeight });
       const res = await waitForBox(dialog, type);
 
       // si el nuevo box ya no es scrolleable, parseá y cortá
       if (!res.scrollable) {
         const finalUsers = parseUsersFromDialog(dialog);
-        sendLog("INFO", `Sin scroll (${type}) - lista completa (re-find)`, { count: finalUsers.length, total });
+        sendLog("INFO", `No scroll (${type}) - full list (re-find)`, { count: finalUsers.length, total });
         await closeDialog();
         await sleep(600);
         return finalUsers;
@@ -869,8 +869,8 @@ async function scrollCollect(type, hrefPart, retrying = false) {
     let percent = 0;
     if (total > 0) percent = Math.max(0, Math.min(100, Math.round((loaded / total) * 100)));
 
-    sendLog("DEBUG", `${type}: ${loaded} cargados...`, { percent, i });
-    sendProgress({ phase: type, loaded, total, percent, text: `Recolectando ${type}... ${percent}%` });
+    sendLog("DEBUG", `${type}: ${loaded} loaded...`, { percent, i });
+    sendProgress({ phase: type, loaded, total, percent, text: `Collecting ${type}... ${percent}%` });
 
     // Salida rápida: si ya cargamos todo lo esperado, evitamos micro-scrolls
     if (total > 0 && loaded >= total) {
@@ -886,10 +886,10 @@ async function scrollCollect(type, hrefPart, retrying = false) {
       const smallList = total > 0 && total <= 50;
 
       if (!smallList && pauseLevel === 3) {
-        sendLog("INFO", "Pausa corta (10s)...", { type });
+        sendLog("INFO", "Short pause (10s)...", { type });
         await sleep(10000);
       } else if (!smallList && pauseLevel >= 5) {
-        sendLog("WARN", "Scroll congelado, simulando micro-scrolls...", { type, pauseLevel });
+        sendLog("WARN", "Scroll stalled, simulating micro-scrolls...", { type, pauseLevel });
         for (let j = 0; j < 10; j++) {
           box.scrollTop -= 250;
           await sleep(300);
@@ -900,7 +900,7 @@ async function scrollCollect(type, hrefPart, retrying = false) {
       }
 
       if (stable >= (smallList ? 2 : 6) && loaded >= Math.min(total || 0, 10)) {
-        sendLog("INFO", `Corte por stable (${type})`, { loaded, stable, smallList });
+        sendLog("INFO", `Stop due to stable (${type})`, { loaded, stable, smallList });
         break;
       }
     } else {
@@ -917,7 +917,7 @@ async function scrollCollect(type, hrefPart, retrying = false) {
     sendLog("WARN", "Trimming followers to expected total", { got: finalUsers.length, total });
     finalUsers = finalUsers.slice(0, total);
   }
-  sendLog("INFO", `Usuarios parseados (${type})`, { count: finalUsers.length });
+  sendLog("INFO", `Users parsed (${type})`, { count: finalUsers.length });
 
   await closeDialog();
   await sleep(650);
@@ -953,7 +953,7 @@ async function navToOwnProfile() {
       const u = href.split("/").filter(Boolean)[0];
       if (u) SELF_USERNAME = u.toLowerCase();
     } catch (_) {}
-    sendLog("INFO", "Navegando a tu perfil (avatar link)", { href });
+    sendLog("INFO", "Navigating to your profile (avatar link)", { href });
     reactClick(avatarLink);
 
     const start = Date.now();
@@ -975,7 +975,7 @@ async function navToOwnProfile() {
       await sleep(350);
     }
 
-    throw new Error("No llegué a tu perfil a tiempo. Abrí tu perfil manualmente y reintentá.");
+    throw new Error("Did not reach your profile in time. Open it manually and retry.");
   }
 
   // 2) fallback por links de 1 segmento (filtrando blacklist)
@@ -993,12 +993,12 @@ async function navToOwnProfile() {
     return true;
   });
 
-  if (!likely) throw new Error("Entrá a tu perfil (donde aparecen Followers/Following) y reintentá.");
+  if (!likely) throw new Error("Open your profile (where Followers/Following appear) and retry.");
 
-  sendLog("INFO", "Navegando a tu perfil (fallback)", { href: likely });
+  sendLog("INFO", "Navigating to your profile (fallback)", { href: likely });
 
   const a = document.querySelector(`a[href="${likely}"]`) || document.querySelector(`a[href="${likely}/"]`);
-  if (!a) throw new Error("No pude clickear el link a tu perfil.");
+  if (!a) throw new Error("Could not click the link to your profile.");
 
   reactClick(a);
 
@@ -1014,7 +1014,7 @@ async function navToOwnProfile() {
     await sleep(350);
   }
 
-  throw new Error("No llegué a tu perfil a tiempo. Abrí tu perfil manualmente y reintentá.");
+  throw new Error("Did not reach your profile in time. Open it manually and retry.");
 }
 
 async function runScan() {
@@ -1026,7 +1026,15 @@ async function runScan() {
   STOP = false;
 
   try {
-    sendLog("INFO", "Iniciando runScan()", { url: location.href });
+    if (!location.hostname.includes("instagram.com")) {
+      throw new Error("Open instagram.com and run the scan again.");
+    }
+    const loginForm = document.querySelector('form[action="/accounts/login/"], form[action="/accounts/login/ajax/"]');
+    if (loginForm) {
+      throw new Error("You must be logged in to Instagram to run the scan.");
+    }
+
+    sendLog("INFO", "Starting runScan()", { url: location.href });
     
     // Mostrar overlay de progreso
     showOverlay();
@@ -1043,7 +1051,7 @@ async function runScan() {
 
     if (!okProfile) {
       await navToOwnProfile();
-      // Esperar más tiempo para que el perfil se cargue completamente
+      // Extra wait to let the profile load completely
       await sleep(1200);
     } else {
       try {
@@ -1092,14 +1100,20 @@ async function runScan() {
   } catch (err) {
     const msg = String(err?.message || err);
     
-    // Ocultar overlay en caso de error
-    hideOverlay();
-    
     if (msg === "STOP") {
-      sendLog("WARN", "STOP recibido durante scan", {});
-      chrome.runtime.sendMessage({ type: "ERROR", message: "Detenido." });
+      // Mantener overlay visible con mensaje de stop
+      showOverlay();
+      updateOverlay({
+        phase: "done",
+        percent: 0,
+        tipText: "Stopped. You can close this window and check the popup.",
+      });
+      sendLog("WARN", "STOP received during scan", {});
+      chrome.runtime.sendMessage({ type: "ERROR", message: "Stopped." });
     } else {
-      sendLog("ERROR", "Excepción en content", { message: msg });
+      // Ocultar overlay en caso de error
+      hideOverlay();
+      sendLog("ERROR", "Exception in content", { message: msg });
       chrome.runtime.sendMessage({ type: "ERROR", message: msg });
     }
   } finally {
@@ -1154,4 +1168,4 @@ document.addEventListener("click", (ev) => {
   }
 });
 
-sendLog("INFO", "content.js cargado", { url: location.href });
+sendLog("INFO", "content.js loaded", { url: location.href });

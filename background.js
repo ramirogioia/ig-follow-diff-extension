@@ -1,8 +1,8 @@
 // background.js (MV3 service worker) - IG Follow Diff
 // FIXES:
-// - Dock bounds usando chrome.system.display.getInfo() (workArea real) + fallback si no hay permiso
-// - Guardar originalBounds/originalWindowState ANTES de redimensionar (para restaurar bien)
-// - Worker window focused:false (evita cosas raras y cierre agresivo del popup)
+// - Dock bounds using chrome.system.display.getInfo() (real workArea) + fallback if no permission
+// - Save originalBounds/originalWindowState BEFORE resizing (to restore correctly)
+// - Worker window focused:false (avoids odd focus issues and aggressive popup closing)
 
 const STORAGE_KEY = "IGFD_STATE";
 
@@ -10,9 +10,10 @@ const DEFAULT_STATE = {
   status: "idle", // idle | running | error | done | unfollowing
   text: "",
   updatedAt: Date.now(),
-  lastResult: null, // {following, followers, noMeSiguen, noSigoYo}
+  lastResult: null, // {following, followers, noMeSiguen, noSigoYo} keys stored
   workerWindowId: null,
   workerTabId: null,
+  workerWindowIds: [],
   originalWindowId: null,
   originalBounds: null,
   originalWindowState: null,
@@ -29,7 +30,7 @@ function nowISO() {
 function log(level, msg, data = {}) {
   const line = { ts: nowISO(), level, scope: "bg", msg, data };
 
-  // logs circular en storage
+  // circular logs in storage
   try {
     chrome.storage.local.get({ IGFD_LOGS: [] }, (res) => {
       const logs = res.IGFD_LOGS || [];
@@ -39,7 +40,7 @@ function log(level, msg, data = {}) {
     });
   } catch (_) {}
 
-  // consola (no tires la extensión si falla console)
+  // console (do not crash extension if console fails)
   try {
     const fn =
       level === "ERROR" ? console.error : level === "WARN" ? console.warn : console.log;
@@ -55,6 +56,20 @@ async function loadState() {
 async function saveState() {
   state.updatedAt = Date.now();
   await chrome.storage.local.set({ [STORAGE_KEY]: state });
+}
+
+function uniq(arr = []) {
+  return Array.from(new Set(arr));
+}
+
+function addWorkerWindowId(id) {
+  if (!id) return;
+  state.workerWindowIds = uniq([...(state.workerWindowIds || []), id]);
+}
+
+function dropWorkerWindowId(id) {
+  if (!id) return;
+  state.workerWindowIds = (state.workerWindowIds || []).filter((x) => x !== id);
 }
 
 async function setState(patch) {
@@ -75,6 +90,7 @@ async function clearWorker(restore = true) {
     try {
       await chrome.windows.remove(workerWindowId);
     } catch (_) {}
+    dropWorkerWindowId(workerWindowId);
   }
 
   if (restore && originalWindowId && originalBounds) {
@@ -91,7 +107,7 @@ async function clearWorker(restore = true) {
         await chrome.windows.update(originalWindowId, { state: "maximized" });
       }
     } catch (err) {
-      log("WARN", "No pude restaurar ventana original", { err: String(err) });
+      log("WARN", "Could not restore original window", { err: String(err) });
     }
   }
 
@@ -101,9 +117,10 @@ async function clearWorker(restore = true) {
     originalWindowId: null,
     originalBounds: null,
     originalWindowState: null,
+    workerWindowIds: state.workerWindowIds,
   });
 
-  log("INFO", "Worker cerrado", { restore });
+  log("INFO", "Worker closed", { restore });
 }
 
 async function ensureContentReady(tabId, timeoutMs = 20000) {
@@ -125,11 +142,11 @@ async function sendToTab(tabId, msg, retries = 8) {
       return await chrome.tabs.sendMessage(tabId, msg);
     } catch (err) {
       lastErr = err;
-      log("WARN", "sendMessage falló, reintentando...", { err: String(err), try: i + 1 });
+      log("WARN", "sendMessage failed, retrying...", { err: String(err), try: i + 1 });
       await new Promise((r) => setTimeout(r, 350 + i * 120));
     }
   }
-  throw lastErr || new Error("sendMessage falló");
+  throw lastErr || new Error("sendMessage failed");
 }
 
 function computeDockBoundsFallback(origBounds) {
@@ -156,7 +173,7 @@ function computeDockBoundsFallback(origBounds) {
 }
 
 async function computeDockBoundsFromDisplay(windowId, fallbackBounds) {
-  // Requiere permiso: "system.display" en manifest
+  // Requires permission: "system.display" in manifest
   try {
     const win = await chrome.windows.get(windowId);
     const displays = await chrome.system.display.getInfo();
@@ -175,7 +192,7 @@ async function computeDockBoundsFromDisplay(windowId, fallbackBounds) {
         );
       }) || displays[0];
 
-    const wa = disp.workArea; // sin taskbar/dock
+    const wa = disp.workArea; // without taskbar/dock
     const totalW = wa.width;
     const totalH = wa.height;
 
@@ -187,7 +204,7 @@ async function computeDockBoundsFromDisplay(windowId, fallbackBounds) {
       worker: { left: wa.left + mainW, top: wa.top, width: workerW, height: totalH },
     };
   } catch (err) {
-    log("WARN", "computeDockBoundsFromDisplay falló, usando fallback", { err: String(err) });
+    log("WARN", "computeDockBoundsFromDisplay failed, using fallback", { err: String(err) });
     return computeDockBoundsFallback(fallbackBounds);
   }
 }
@@ -196,11 +213,23 @@ async function startScanDocked() {
   log("INFO", "startScanDocked()", {});
   await loadState();
 
-  // cerrar worker previo sin restaurar (lo vamos a recalcular)
+  // Prevent multiple workers: if an existing worker window is still open, block start
+  if (state.workerWindowId) {
+    try {
+      const existing = await chrome.windows.get(state.workerWindowId);
+      if (existing) {
+        throw new Error("Worker already open. Close it first.");
+      }
+    } catch (err) {
+      // if window not found, continue (stale id)
+    }
+  }
+
+  // close previous worker (stale) without restoring (will recalc)
   await clearWorker(false);
 
   const [activeTab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
-  if (!activeTab) throw new Error("No pude detectar la pestaña activa.");
+  if (!activeTab) throw new Error("Could not detect the active tab.");
 
   const origWin = await chrome.windows.get(activeTab.windowId);
 
@@ -211,7 +240,7 @@ async function startScanDocked() {
     height: origWin.height ?? 900,
   };
 
-  // guardar para restaurar
+  // store original bounds to restore later
   await setState({
     originalWindowId: origWin.id,
     originalBounds: origBounds,
@@ -220,12 +249,12 @@ async function startScanDocked() {
 
   const dock = await computeDockBoundsFromDisplay(origWin.id, origBounds);
 
-  // normalizar para setear bounds
+  // normalize before setting bounds
   try {
     await chrome.windows.update(origWin.id, { state: "normal" });
   } catch (_) {}
 
-  // ventana usuario a la izquierda
+  // main window on the left
   await chrome.windows.update(origWin.id, {
     left: dock.main.left,
     top: dock.main.top,
@@ -233,8 +262,8 @@ async function startScanDocked() {
     height: dock.main.height,
   });
 
-  // worker a la derecha
-  // detectar perfil actual desde la pestaña activa (primer segmento no blacklist)
+  // worker on the right
+  // detect current profile from active tab (first non-blacklisted segment)
   let detectedProfile = null;
   if (activeTab.url && activeTab.url.startsWith("https://www.instagram.com/")) {
     try {
@@ -270,11 +299,14 @@ async function startScanDocked() {
   });
 
   const workerTabId = workerWin.tabs?.[0]?.id;
-  if (!workerTabId) throw new Error("No pude obtener tabId del worker.");
+  if (!workerTabId) throw new Error("Could not obtain worker tabId.");
+
+  addWorkerWindowId(workerWin.id);
 
   await setState({
     workerWindowId: workerWin.id,
     workerTabId,
+    workerWindowIds: state.workerWindowIds,
   });
 
   log("INFO", "Worker docked", {
@@ -286,14 +318,14 @@ async function startScanDocked() {
   });
 
   const ready = await ensureContentReady(workerTabId, 25000);
-  if (!ready) throw new Error("No pude comunicarme con el content script del tab worker.");
+  if (!ready) throw new Error("Could not communicate with the worker tab content script.");
 
-  // Esperar para que Instagram cargue completamente
+  // Wait a bit for Instagram to load fully
   await new Promise((r) => setTimeout(r, 1000));
 
   await setState({
     status: "running",
-    text: "Iniciando...",
+    text: "Starting...",
     progress: { phase: "", loaded: 0, total: 0, percent: 0 },
     unfollow: { running: false, username: null },
   });
@@ -307,24 +339,63 @@ async function startScanDocked() {
 
 async function stopAll() {
   await loadState();
-  if (state.workerTabId) {
+  const targets = new Set();
+  if (state.workerTabId) targets.add(state.workerTabId);
+
+  try {
+    const workerWin = state.workerWindowId
+      ? await chrome.windows.get(state.workerWindowId, { populate: true }).catch(() => null)
+      : null;
+    const candidateTabs = [];
+    if (workerWin?.tabs) candidateTabs.push(...workerWin.tabs);
+    const [activeTab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+    if (activeTab) candidateTabs.push(activeTab);
+    for (const t of candidateTabs) {
+      if (t.id && t.url && t.url.startsWith("https://www.instagram.com/")) {
+        targets.add(t.id);
+      }
+    }
+  } catch (_) {}
+
+  for (const tabId of targets) {
     try {
-      await sendToTab(state.workerTabId, { type: "STOP" }, 3);
+      await sendToTab(tabId, { type: "STOP" }, 2);
     } catch (_) {}
   }
-  await setState({ status: "idle", text: "Detenido." });
+
+  await setState({
+    status: "idle",
+    text: "Stopped.",
+    progress: { phase: "", loaded: 0, total: 0, percent: 0 },
+    workerWindowId: null,
+    workerTabId: null,
+    workerWindowIds: state.workerWindowIds,
+  });
+}
+
+async function clearAllWorkers() {
+  await stopAll();
+  const ids = uniq(state.workerWindowIds || []);
+  for (const wid of ids) {
+    try {
+      await chrome.windows.remove(wid);
+    } catch (_) {}
+    dropWorkerWindowId(wid);
+  }
+  await clearWorker(true);
+  await setState({ status: "idle", text: "", workerWindowIds: [] });
 }
 
 chrome.runtime.onInstalled.addListener(async () => {
   await loadState();
   await saveState();
-  log("INFO", "Service worker iniciado", { state });
+  log("INFO", "Service worker started", { state });
 });
 
 chrome.runtime.onStartup.addListener(async () => {
   await loadState();
   await saveState();
-  log("INFO", "Service worker iniciado (startup)", { state });
+  log("INFO", "Service worker started (startup)", { state });
 });
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
@@ -351,13 +422,19 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         return;
       }
 
+      if (msg.type === "BG_CLEAR_WORKERS") {
+        await clearAllWorkers();
+        sendResponse({ ok: true });
+        return;
+      }
+
       if (msg.type === "PROFILE_HREF") {
         await setState({ profileHref: msg.href || null });
         sendResponse({ ok: true });
         return;
       }
 
-      // Mensajes desde content
+      // Messages from content
       if (msg.type === "LOG") {
         const level = msg.level || "INFO";
         const data = msg.data || {};
@@ -399,11 +476,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       if (msg.type === "RESULT") {
         await setState({
           status: "done",
-          text: "Listo.",
+          text: "Done.",
           lastResult: msg.result || null,
         });
 
-        log("INFO", "RESULT recibido", {
+        log("INFO", "RESULT received", {
           following: msg.result?.following?.length,
           followers: msg.result?.followers?.length,
           noMeSiguen: msg.result?.noMeSiguen?.length,
@@ -425,7 +502,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           text: msg.message || "Error",
         });
 
-        log("ERROR", "ERROR desde content", { message: msg.message, tabId: sender?.tab?.id });
+        log("ERROR", "ERROR from content", { message: msg.message, tabId: sender?.tab?.id });
         sendResponse({ ok: true });
         return;
       }
@@ -448,7 +525,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         return;
       }
     } catch (err) {
-      log("ERROR", "Excepción en onMessage", { message: String(err), msg });
+      log("ERROR", "Exception in onMessage", { message: String(err), msg });
       await setState({ status: "error", text: String(err) });
       sendResponse({ ok: false, error: String(err) });
     }

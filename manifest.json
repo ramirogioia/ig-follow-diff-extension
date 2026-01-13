@@ -1,12 +1,12 @@
 {
   "manifest_version": 3,
-  "name": "IG Follow Diff",
-  "version": "0.4.0",
-  "description": "Encuentra quién no te sigue y permite dejar de seguir (requiere Instagram abierto).",
-  "permissions": ["storage", "tabs", "windows", "system.display"],
+  "name": "G-Follow Inspector",
+  "version": "1.0.0",
+  "description": "Find who doesn’t follow you back on Instagram. Compare followers vs. following quickly.",
+  "permissions": ["storage", "tabs", "windows"],
   "host_permissions": ["https://www.instagram.com/*"],
   "action": {
-    "default_title": "IG Follow Diff",
+    "default_title": "G-Follow Inspector",
     "default_popup": "popup/popup.html"
   },
   "background": {
@@ -15,7 +15,7 @@
   "web_accessible_resources": [
     {
       "resources": ["icons/*"],
-      "matches": ["<all_urls>"]
+      "matches": ["https://www.instagram.com/*"]
     }
   ],
   "content_scripts": [

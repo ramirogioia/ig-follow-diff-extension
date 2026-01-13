@@ -8,6 +8,7 @@ G-Follow Inspector helps you quickly identify accounts that don’t follow you b
 - Followers vs. following comparison.
 - Progress screen while scanning.
 - Clear results list you can review anytime.
+- Export results to CSV (both “They follow, I don’t” and “I follow, they don’t” in one file).
 
 ## Requirements
 - Chromium-based browser with extension support (Chrome, Edge, Brave).
@@ -33,6 +34,12 @@ G-Follow Inspector helps you quickly identify accounts that don’t follow you b
 - Keep the worker window visible; minimizing can pause loading.
 - Not affiliated with Instagram or Meta.
 
+## Privacy & Data
+- The extension reads followers/following only on `instagram.com`.
+- Data stays local in `chrome.storage`; nothing is sent to external servers.
+- No passwords, cookies or tokens are collected.
+- Provide a privacy policy URL in the Chrome Web Store listing (recommended/required).
+
 ## Development
 Files of interest:
 - `content.js`: scraping, overlay, scroll handling.
@@ -47,4 +54,4 @@ To reload during dev: open `chrome://extensions`, click **Reload** on the extens
 - **Unfollow not clicking**: ensure the profile page is fully loaded; if the modal doesn’t show “Unfollow/Dejar de seguir”, retry manually once.
 
 ## Permissions
-- `storage`, `tabs`, `windows`, `system.display` (for docking), and host `https://www.instagram.com/*`.
+- `storage`, `tabs`, `windows`, host `https://www.instagram.com/*`.

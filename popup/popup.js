@@ -15,8 +15,8 @@ const listTitle = $("listTitle");
 const chipNoMeSiguen = $("chip-noMeSiguen");
 const chipNoSigoYo = $("chip-noSigoYo");
 
-const refreshBtn = $("refreshBtn");
 const copyBtn = $("copyBtn");
+const downloadBtn = $("downloadBtn");
 const clearBtn = $("clearBtn");
 
 const logsBox = $("logsBox");
@@ -27,6 +27,8 @@ const closeWorkerBtn = $("closeWorkerBtn");
 
 let currentState = null;
 let currentListType = "noMeSiguen"; // noMeSiguen | noSigoYo
+let cachedResults = { noMeSiguen: [], noSigoYo: [] };
+let copyHintTimer = null;
 
 function fmtLine(l) {
   const d = l.data ? "  " + JSON.stringify(l.data) : "";
@@ -60,8 +62,11 @@ function setStatusUI(st) {
   statusText.textContent = txt;
 
   const running = s === "running";
+  const workerOpen = Boolean(st?.workerWindowId);
 
-  scanBtn.disabled = running;
+  scanBtn.textContent = workerOpen ? "Close" : "Scan";
+  scanBtn.dataset.mode = workerOpen ? "close" : "scan";
+
   stopBtn.disabled = !running;
 }
 
@@ -75,13 +80,15 @@ function renderReport(st) {
     hint.style.display = r ? "none" : "block";
   }
 
+  cachedResults = { noMeSiguen, noSigoYo };
+
   countNoMeSiguen.textContent = String(noMeSiguen.length);
   countNoSigoYo.textContent = String(noSigoYo.length);
 
   noMeSiguenList.innerHTML = "";
 
   const list = currentListType === "noSigoYo" ? noSigoYo : noMeSiguen;
-  const titleText = currentListType === "noSigoYo" ? "They follow, I don’t" : "They don’t follow me";
+  const titleText = currentListType === "noSigoYo" ? "I don’t follow" : "Don’t follow me";
   if (listTitle) listTitle.textContent = titleText;
 
   if (!list.length) {
@@ -173,14 +180,79 @@ function setupChips() {
   activate("noMeSiguen");
 }
 
-scanBtn.addEventListener("click", async () => {
-  await new Promise((resolve, reject) => {
-    chrome.runtime.sendMessage({ type: "BG_SCAN_START_DOCKED" }, (res) => {
-      if (res?.ok) resolve(true);
-      else reject(new Error(res?.error || "Error"));
-    });
+function xmlEscape(str) {
+  return String(str || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
+}
+
+function buildExcelXml() {
+  const { noMeSiguen, noSigoYo } = cachedResults;
+
+  const sheet = (name, values) => {
+    const rows = [`<Row><Cell><Data ss:Type="String">username</Data></Cell></Row>`];
+    for (const u of values) {
+      rows.push(`<Row><Cell><Data ss:Type="String">${xmlEscape(u)}</Data></Cell></Row>`);
+    }
+    return `
+      <Worksheet ss:Name="${xmlEscape(name)}">
+        <Table>
+          ${rows.join("")}
+        </Table>
+      </Worksheet>
+    `;
+  };
+
+  return `<?xml version="1.0"?>
+  <Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet"
+            xmlns:o="urn:schemas-microsoft-com:office:office"
+            xmlns:x="urn:schemas-microsoft-com:office:excel"
+            xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet">
+    ${sheet("They follow, I don’t", noSigoYo)}
+    ${sheet("I follow, they don’t", noMeSiguen)}
+  </Workbook>`;
+}
+
+function setupDownload() {
+  if (!downloadBtn) return;
+  downloadBtn.addEventListener("click", () => {
+    const hasData = (cachedResults.noMeSiguen?.length || 0) > 0 || (cachedResults.noSigoYo?.length || 0) > 0;
+    if (!hasData) return;
+    const xls = buildExcelXml();
+    const blob = new Blob([xls], { type: "application/vnd.ms-excel" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "g-follow-inspector.xls";
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
   });
-  // popup se cerrará si cambia el foco: aceptado por vos.
+}
+
+scanBtn.addEventListener("click", async () => {
+  const mode = scanBtn.dataset.mode || "scan";
+  scanBtn.disabled = true;
+
+  if (mode === "close") {
+    await new Promise((resolve) => chrome.runtime.sendMessage({ type: "BG_CLEAR_WORKER" }, () => resolve(true)));
+    await refreshAll();
+    scanBtn.disabled = false;
+    return;
+  }
+
+  statusText.textContent = "Starting...";
+  chrome.runtime.sendMessage({ type: "BG_SCAN_START_DOCKED" }, async (res) => {
+    if (res?.error) {
+      statusText.textContent = res.error;
+    }
+    await refreshAll();
+    scanBtn.disabled = false;
+  });
 });
 
 stopBtn.addEventListener("click", async () => {
@@ -188,19 +260,32 @@ stopBtn.addEventListener("click", async () => {
   await refreshAll();
 });
 
-refreshBtn.addEventListener("click", refreshAll);
-
 copyBtn.addEventListener("click", async () => {
+  const originalText = copyBtn.textContent;
   const st = await getState();
   const r = st?.lastResult;
   const text = JSON.stringify(r || {}, null, 2);
   await navigator.clipboard.writeText(text);
+  if (copyHintTimer) clearTimeout(copyHintTimer);
+  copyBtn.textContent = "Copied";
+  copyBtn.disabled = true;
+  copyHintTimer = setTimeout(() => {
+    copyBtn.textContent = originalText;
+    copyBtn.disabled = false;
+  }, 1200);
 });
 
 clearBtn.addEventListener("click", async () => {
   // limpia resultados y logs
   await chrome.storage.local.set({
-    IGFD_STATE: { ...(currentState || {}), lastResult: null, text: "", status: "idle" }
+    IGFD_STATE: {
+      ...(currentState || {}),
+      lastResult: null,
+      text: "",
+      status: "idle",
+      progress: { phase: "", loaded: 0, total: 0, percent: 0 },
+      unfollow: { running: false, username: null },
+    }
   });
   await refreshAll();
 });
@@ -216,12 +301,13 @@ logsClearBtn.addEventListener("click", async () => {
 });
 
 closeWorkerBtn.addEventListener("click", async () => {
-  await new Promise((resolve) => chrome.runtime.sendMessage({ type: "BG_CLEAR_WORKER" }, () => resolve(true)));
+  await new Promise((resolve) => chrome.runtime.sendMessage({ type: "BG_CLEAR_WORKERS" }, () => resolve(true)));
   await refreshAll();
 });
 
 setupTabs();
 setupChips();
+setupDownload();
 refreshAll();
 
 // auto-refresh mientras está abierto
