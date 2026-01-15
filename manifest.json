@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "G-Follow Inspector",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Find who doesn’t follow you back on Instagram. Compare followers vs. following quickly.",
   "permissions": ["storage", "tabs", "windows"],
   "host_permissions": ["https://www.instagram.com/*"],
