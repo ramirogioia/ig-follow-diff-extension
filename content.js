@@ -7,6 +7,7 @@
 
 let STOP = false;
 let RUNNING = false;
+let UNFOLLOW_RUNNING = false;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -64,7 +65,9 @@ function createOverlay() {
       </div>
       
       <div class="igfd-tip" id="igfd-tip">
-        Keep this window open while we work...
+        <span class="igfd-tip-icon">⚠️</span>
+        <span class="igfd-tip-text">Keep this window open while we work...</span>
+        <span class="igfd-tip-icon">⚠️</span>
       </div>
       <div class="igfd-arrow-hint" id="igfd-arrow-hint" style="display:none;">
         <div class="igfd-popup-demo">
@@ -246,10 +249,17 @@ function createOverlay() {
     }
     
     .igfd-tip {
-      font-size: 14px;
-      opacity: 0.7;
-      font-style: italic;
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      justify-content: center;
+      font-size: 16px;
+      font-weight: 800;
+      opacity: 0.9;
+      padding: 6px 12px;
     }
+    .igfd-tip-icon { font-size: 18px; }
+    .igfd-tip-text { font-style: italic; }
 
     .igfd-close-btn {
       margin: 18px auto 0;
@@ -468,6 +478,43 @@ function dispatchHover(el) {
   const y = rect.top + Math.min(20, rect.height / 2);
   el.dispatchEvent(new MouseEvent("mousemove", { bubbles: true, cancelable: true, clientX: x, clientY: y }));
   el.dispatchEvent(new MouseEvent("mouseover", { bubbles: true, cancelable: true, clientX: x, clientY: y }));
+}
+
+function centerPointerClick(el) {
+  if (!el) return;
+  const rect = el.getBoundingClientRect();
+  const x = rect.left + rect.width / 2;
+  const y = rect.top + rect.height / 2;
+  const target = document.elementFromPoint(x, y) || el;
+  const opts = { bubbles: true, cancelable: true, clientX: x, clientY: y, view: window };
+  try { target.dispatchEvent(new PointerEvent("pointerdown", opts)); } catch (_) {}
+  try { target.dispatchEvent(new MouseEvent("mousedown", opts)); } catch (_) {}
+  try { target.dispatchEvent(new PointerEvent("pointerup", opts)); } catch (_) {}
+  try { target.dispatchEvent(new MouseEvent("mouseup", opts)); } catch (_) {}
+  try { target.dispatchEvent(new MouseEvent("click", opts)); } catch (_) {}
+  if (typeof target.click === "function") {
+    try { target.click(); } catch (_) {}
+  }
+}
+
+function strongClick(el) {
+  if (!el) return;
+  try {
+    el.scrollIntoView({ block: "center", inline: "center" });
+  } catch (_) {}
+  try {
+    dispatchHover(el);
+    centerPointerClick(el);
+    const child = el.querySelector("button, div[role='button'], span");
+    if (child) centerPointerClick(child);
+    reactClick(el);
+    try { el.focus?.(); } catch (_) {}
+    try { el.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", code: "Enter", bubbles: true })); } catch (_) {}
+    try { el.dispatchEvent(new KeyboardEvent("keyup", { key: "Enter", code: "Enter", bubbles: true })); } catch (_) {}
+    try { el.dispatchEvent(new KeyboardEvent("keydown", { key: " ", code: "Space", bubbles: true })); } catch (_) {}
+    try { el.dispatchEvent(new KeyboardEvent("keyup", { key: " ", code: "Space", bubbles: true })); } catch (_) {}
+    if (typeof el.click === "function") el.click();
+  } catch (_) {}
 }
 
 async function waitForDialog() {
@@ -1017,6 +1064,165 @@ async function navToOwnProfile() {
   throw new Error("Did not reach your profile in time. Open it manually and retry.");
 }
 
+// ============================================
+// UNFOLLOW FLOW
+// ============================================
+
+function normalizeText(value) {
+  return (typeof value === "string" ? value : (value?.innerText || value?.textContent || ""))
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+}
+
+async function waitFor(fn, timeout = 12000, interval = 300) {
+  const start = Date.now();
+  while (Date.now() - start < timeout) {
+    const res = await fn();
+    if (res) return res;
+    await sleep(interval);
+  }
+  return null;
+}
+
+function findFollowButtonCandidate() {
+  const buttons = Array.from(document.querySelectorAll('button, div[role="button"]')).filter(isVisible);
+  const matchText = (btn) => {
+    const t = normalizeText(btn);
+    return (
+      t.includes("following") ||
+      t.includes("siguiendo") ||
+      t.includes("requested") ||
+      t.includes("solicitado")
+    );
+  };
+
+  const textBtn = buttons.find(matchText);
+  if (textBtn) return textBtn;
+
+  const labelBtn = buttons.find((btn) => {
+    const label = normalizeText(btn.getAttribute("aria-label") || "");
+    return label.includes("following") || label.includes("siguiendo");
+  });
+  if (labelBtn) return labelBtn;
+
+  // Fallback: first button that contains a child with text "Following"
+  const deepBtn = buttons.find((btn) => {
+    const txt = normalizeText(btn.innerText || btn.textContent || "");
+    return txt.includes("following") || txt.includes("siguiendo");
+  });
+  return deepBtn || null;
+}
+
+async function waitForFollowButton(timeout = 15000) {
+  return waitFor(() => findFollowButtonCandidate(), timeout, 300);
+}
+
+async function waitForUnfollowConfirm(timeout = 7000) {
+  return waitFor(() => {
+    const buttons = Array.from(document.querySelectorAll('button, div[role="button"]'));
+    return (
+      buttons.find((b) => {
+        const t = normalizeText(b);
+        return t.includes("unfollow") || t.includes("dejar de seguir");
+      }) || null
+    );
+  }, timeout, 200);
+}
+
+async function ensureOnProfile(username) {
+  const clean = username.toLowerCase();
+  const targetPath = `/${clean}/`;
+  if (!location.pathname.toLowerCase().includes(targetPath)) {
+    location.href = `https://www.instagram.com${targetPath}`;
+    const ok = await waitFor(
+      () => location.pathname.toLowerCase().includes(targetPath),
+      15000,
+      400
+    );
+    if (!ok) throw new Error("Could not open the profile page.");
+    await sleep(900);
+  }
+  return true;
+}
+
+async function waitForProfileReady(timeout = 15000) {
+  return waitFor(() => {
+    const header = document.querySelector("header");
+    const hasFollow = findFollowButtonCandidate();
+    const hasCounters = document.querySelector('a[href*="/followers"]') && document.querySelector('a[href*="/following"]');
+    return header && (hasFollow || hasCounters);
+  }, timeout, 300);
+}
+
+async function unfollowUser(username) {
+  const clean = String(username || "").replace(/^@/, "").trim();
+  if (!clean) throw new Error("Username missing");
+  if (UNFOLLOW_RUNNING) throw new Error("Another unfollow is already running.");
+
+  UNFOLLOW_RUNNING = true;
+  try {
+    await ensureOnProfile(clean);
+    await waitForProfileReady(15000);
+    await sleep(400);
+
+    const btn = await waitForFollowButton(15000);
+    if (!btn) throw new Error("Follow/Following button not found.");
+
+    const btnText = normalizeText(btn);
+    sendLog("INFO", "UNFOLLOW_BTN", { text: btnText, username: clean });
+
+    if (btnText.includes("follow") || btnText.includes("seguir")) {
+      return { ok: true, message: `Already not following @${clean}` };
+    }
+
+    // Intentar abrir el menú (Following) con reintentos cortos
+    let confirm = null;
+    for (let i = 0; i < 3; i++) {
+      strongClick(btn);
+      await sleep(600 + i * 200);
+      confirm = await waitForUnfollowConfirm(1800 + i * 600);
+      if (confirm) break;
+    }
+    if (!confirm) throw new Error("Unfollow confirmation not found.");
+
+    // Click en Unfollow con reintentos
+    let confirmed = false;
+    for (let i = 0; i < 3; i++) {
+      strongClick(confirm);
+      await sleep(700 + i * 200);
+      const backToFollow = await waitFor(() => {
+        const candidate = findFollowButtonCandidate();
+        if (!candidate) return null;
+        const t = normalizeText(candidate);
+        return t.includes("follow") || t.includes("seguir") ? candidate : null;
+      }, 2000, 250);
+      if (backToFollow) {
+        confirmed = true;
+        break;
+      }
+    }
+
+    const finalState = confirmed
+      ? true
+      : await waitFor(() => {
+          const candidate = findFollowButtonCandidate();
+          if (!candidate) return null;
+          const t = normalizeText(candidate);
+          return t.includes("follow") || t.includes("seguir") ? candidate : null;
+        }, 10000, 300);
+
+    const ok = Boolean(finalState);
+    const message = ok
+      ? `Unfollowed @${clean}`
+      : `Unfollowed @${clean} (could not confirm state)`;
+    sendLog("INFO", "UNFOLLOW_DONE_LOCAL", { username: clean, ok, message });
+    return { ok, message };
+  } finally {
+    UNFOLLOW_RUNNING = false;
+  }
+}
+
 async function runScan() {
   if (RUNNING) {
     sendLog("WARN", "runScan() ignorado (ya corriendo)", { url: location.href });
@@ -1136,6 +1342,25 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         STOP = true;
         sendLog("WARN", "STOP recibido", {});
         sendResponse({ ok: true });
+        return;
+      }
+
+      if (msg.type === "UNFOLLOW") {
+        const username = msg.username || "";
+        try {
+          const res = await unfollowUser(username);
+          try {
+            chrome.runtime.sendMessage({ type: "UNFOLLOW_DONE", ok: true, username, message: res?.message });
+          } catch (_) {}
+          sendResponse({ ok: true, message: res?.message || "", result: res });
+        } catch (err) {
+          const message = String(err?.message || err);
+          sendLog("ERROR", "UNFOLLOW_FAILED", { username, message });
+          try {
+            chrome.runtime.sendMessage({ type: "UNFOLLOW_DONE", ok: false, username, message });
+          } catch (_) {}
+          sendResponse({ ok: false, error: message });
+        }
         return;
       }
 

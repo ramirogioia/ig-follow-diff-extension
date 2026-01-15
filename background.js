@@ -5,6 +5,7 @@
 // - Worker window focused:false (avoids odd focus issues and aggressive popup closing)
 
 const STORAGE_KEY = "IGFD_STATE";
+const DEFAULT_UNFOLLOW_STATE = { running: false, username: null };
 
 const DEFAULT_STATE = {
   status: "idle", // idle | running | error | done | unfollowing
@@ -19,6 +20,7 @@ const DEFAULT_STATE = {
   originalWindowState: null,
   progress: { phase: "", loaded: 0, total: 0, percent: 0 },
   profileHref: null,
+  unfollow: { ...DEFAULT_UNFOLLOW_STATE },
 };
 
 let state = { ...DEFAULT_STATE };
@@ -327,7 +329,7 @@ async function startScanDocked() {
     status: "running",
     text: "Starting...",
     progress: { phase: "", loaded: 0, total: 0, percent: 0 },
-    unfollow: { running: false, username: null },
+    unfollow: { ...DEFAULT_UNFOLLOW_STATE },
   });
 
   await sendToTab(workerTabId, { type: "SCAN_START" });
@@ -370,6 +372,7 @@ async function stopAll() {
     workerWindowId: null,
     workerTabId: null,
     workerWindowIds: state.workerWindowIds,
+    unfollow: { ...DEFAULT_UNFOLLOW_STATE },
   });
 }
 
@@ -417,7 +420,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
       if (msg.type === "BG_CLEAR_WORKER") {
         await clearWorker(true);
-        await setState({ status: "idle", text: "" });
+        await setState({ status: "idle", text: "", unfollow: { ...DEFAULT_UNFOLLOW_STATE } });
         sendResponse({ ok: true });
         return;
       }
@@ -425,6 +428,48 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       if (msg.type === "BG_CLEAR_WORKERS") {
         await clearAllWorkers();
         sendResponse({ ok: true });
+        return;
+      }
+
+      if (msg.type === "UNFOLLOW") {
+        await loadState();
+        const username = (msg.username || "").trim();
+
+        if (!username) {
+          sendResponse({ ok: false, error: "Username missing" });
+          return;
+        }
+
+        const workerTabId = state.workerTabId;
+        if (!workerTabId) {
+          sendResponse({ ok: false, error: "Worker not available. Run a scan again." });
+          return;
+        }
+
+        await setState({
+          status: "unfollowing",
+          text: `Unfollowing @${username}...`,
+          unfollow: { running: true, username },
+        });
+
+        try {
+          const res = await sendToTab(workerTabId, { type: "UNFOLLOW", username });
+          const message = res?.message || `Unfollowed @${username}`;
+          await setState({
+            status: "done",
+            text: message,
+            unfollow: { ...DEFAULT_UNFOLLOW_STATE },
+          });
+          sendResponse({ ok: true, result: res, message });
+        } catch (err) {
+          const message = String(err);
+          await setState({
+            status: "error",
+            text: message,
+            unfollow: { ...DEFAULT_UNFOLLOW_STATE },
+          });
+          sendResponse({ ok: false, error: message });
+        }
         return;
       }
 
@@ -478,6 +523,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           status: "done",
           text: "Done.",
           lastResult: msg.result || null,
+          unfollow: { ...DEFAULT_UNFOLLOW_STATE },
         });
 
         log("INFO", "RESULT received", {
@@ -491,7 +537,15 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       }
 
       if (msg.type === "UNFOLLOW_DONE") {
-        // Unfollow flow removed in this version
+        const username = msg.username || null;
+        const ok = Boolean(msg.ok);
+        const message = msg.message || (ok ? `Unfollowed ${username || ""}`.trim() : "Unfollow failed");
+        await setState({
+          status: ok ? "done" : "error",
+          text: message,
+          unfollow: { ...DEFAULT_UNFOLLOW_STATE },
+        });
+        log(ok ? "INFO" : "ERROR", "UNFOLLOW_DONE", { username, message });
         sendResponse({ ok: true });
         return;
       }
@@ -500,6 +554,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         await setState({
           status: "error",
           text: msg.message || "Error",
+          unfollow: { ...DEFAULT_UNFOLLOW_STATE },
         });
 
         log("ERROR", "ERROR from content", { message: msg.message, tabId: sender?.tab?.id });

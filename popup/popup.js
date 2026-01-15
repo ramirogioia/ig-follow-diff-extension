@@ -61,7 +61,7 @@ function setStatusUI(st) {
   const txt = st?.text || (s === "idle" ? "Ready" : s);
   statusText.textContent = txt;
 
-  const running = s === "running";
+  const running = s === "running" || s === "unfollowing" || Boolean(st?.unfollow?.running);
   const workerOpen = Boolean(st?.workerWindowId);
 
   scanBtn.textContent = workerOpen ? "Close" : "Scan";
@@ -74,6 +74,7 @@ function renderReport(st) {
   const r = st?.lastResult;
   const noMeSiguen = r?.noMeSiguen || [];
   const noSigoYo = r?.noSigoYo || [];
+  const unfollowState = st?.unfollow || { running: false, username: null };
   const hint = $("hint");
 
   if (hint) {
@@ -117,9 +118,19 @@ function renderReport(st) {
     const right = document.createElement("div");
     right.className = "right";
 
-    const badge = document.createElement("span");
-    badge.className = "badge";
-    badge.textContent = "Ready";
+    const unfollowBtn = document.createElement("button");
+    unfollowBtn.className = "btn small danger";
+    const isThisRunning = unfollowState.running && unfollowState.username === u;
+    unfollowBtn.textContent = isThisRunning ? "Working..." : "Unfollow";
+    unfollowBtn.disabled = Boolean(unfollowState.running);
+    unfollowBtn.addEventListener("click", async () => {
+      unfollowBtn.disabled = true;
+      unfollowBtn.textContent = "Working...";
+      await new Promise((resolve) =>
+        chrome.runtime.sendMessage({ type: "UNFOLLOW", username: u }, () => resolve(true))
+      );
+      await refreshAll();
+    });
 
     const open = document.createElement("button");
     open.className = "btn small";
@@ -128,7 +139,7 @@ function renderReport(st) {
       chrome.tabs.create({ url: `https://www.instagram.com/${u}/` });
     });
 
-    right.appendChild(badge);
+    right.appendChild(unfollowBtn);
     right.appendChild(open);
 
     row.appendChild(left);
