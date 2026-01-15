@@ -23,6 +23,9 @@ const gIconSrc = (typeof chrome !== "undefined" && chrome.runtime?.getURL)
   ? chrome.runtime.getURL("icons/icon48.png")
   : "";
 let SELF_USERNAME = null;
+let UNFOLLOW_COUNT = 0;
+let EXPECTED_TOTALS = { following: 0, followers: 0 };
+let FOLLOW_RUNNING = false;
 
 function createOverlay() {
   if (overlayElement) return overlayElement;
@@ -39,6 +42,9 @@ function createOverlay() {
           <circle cx="12" cy="12" r="10"/>
           <path d="M12 6v6l4 2"/>
         </svg>
+      </div>
+      <div class="igfd-avatar" id="igfd-avatar" style="display:none;">
+        <img id="igfd-avatar-img" src="" alt="Profile picture" />
       </div>
       <h1 class="igfd-title">G-Follow Inspector</h1>
       <p class="igfd-subtitle" id="igfd-phase">Starting...</p>
@@ -69,6 +75,7 @@ function createOverlay() {
         <span class="igfd-tip-text">Keep this window open while we work...</span>
         <span class="igfd-tip-icon">⚠️</span>
       </div>
+      <div class="igfd-tip-note">👈 You can keep using the left window! 👈</div>
       <div class="igfd-arrow-hint" id="igfd-arrow-hint" style="display:none;">
         <div class="igfd-popup-demo">
           <div class="igfd-popup-icon" style="background-image: url('${gIconSrc}');"></div>
@@ -76,14 +83,13 @@ function createOverlay() {
         </div>
         <div class="igfd-arrow-text">¡Check Extension to see the results!</div>
       </div>
-      <button class="igfd-close-btn" id="igfd-close-btn" style="display:none;">Close worker window</button>
     </div>
   `;
 
   // Estilos
   const style = document.createElement('style');
   style.textContent = `
-    #igfd-overlay {
+#igfd-overlay {
       position: fixed;
       top: 0;
       left: 0;
@@ -91,7 +97,7 @@ function createOverlay() {
       height: 100vh;
       background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
       z-index: 999999;
-      pointer-events: none;
+      pointer-events: auto; /* bloquear interacción con IG mientras corre */
       display: flex;
       align-items: center;
       justify-content: center;
@@ -167,6 +173,22 @@ function createOverlay() {
     
     .igfd-logo svg {
       animation: igfd-spin 3s linear infinite;
+    }
+    .igfd-avatar {
+      width: 96px;
+      height: 96px;
+      margin: -2px auto 14px;
+      border-radius: 50%;
+      overflow: hidden;
+      box-shadow: 0 10px 24px rgba(0,0,0,0.25);
+      border: 3px solid rgba(255,255,255,0.5);
+      background: rgba(255,255,255,0.08);
+    }
+    .igfd-avatar img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      display: block;
     }
     
     @keyframes igfd-spin {
@@ -260,23 +282,12 @@ function createOverlay() {
     }
     .igfd-tip-icon { font-size: 18px; }
     .igfd-tip-text { font-style: italic; }
-
-    .igfd-close-btn {
-      margin: 18px auto 0;
-      padding: 10px 16px;
-      background: #fff;
-      color: #4c3fb3;
-      border: none;
-      border-radius: 12px;
-      font-weight: 700;
-      cursor: pointer;
-      box-shadow: 0 6px 14px rgba(0,0,0,0.12);
-      display: inline-block;
+    .igfd-tip-note {
+      margin-top: 6px;
+      font-size: 14px;
+      opacity: 0.9;
     }
 
-    .igfd-close-btn:hover {
-      filter: brightness(0.97);
-    }
 
     .igfd-arrow-hint {
       margin-top: 12px;
@@ -335,8 +346,9 @@ function createOverlay() {
     }
   `;
 
-  document.head.appendChild(style);
-  document.body.appendChild(overlay);
+  (document.head || document.documentElement).appendChild(style);
+  const parent = document.body || document.documentElement;
+  parent.appendChild(overlay);
   overlayElement = overlay;
   
   return overlay;
@@ -345,6 +357,9 @@ function createOverlay() {
 function showOverlay() {
   const overlay = createOverlay();
   overlay.style.display = 'flex';
+  // Mostrar el icono de carga solo cuando hay tarea en curso
+  const logo = overlay.querySelector('.igfd-logo');
+  if (logo) logo.style.display = 'flex';
   sendLog("INFO", "Overlay mostrado", {});
 }
 
@@ -354,11 +369,13 @@ function hideOverlay() {
     setTimeout(() => {
       overlayElement.style.display = 'none';
     }, 300);
+    const logo = overlayElement.querySelector('.igfd-logo');
+    if (logo) logo.style.display = 'flex';
     sendLog("INFO", "Overlay ocultado", {});
   }
 }
 
-function updateOverlay({ phase, loaded, total, percent, followingCount, followersCount, tipText }) {
+function updateOverlay({ phase, loaded, total, percent, followingCount, followersCount, tipText, profilePicUrl }) {
   if (!overlayElement) return;
   
   const phaseEl = document.getElementById('igfd-phase');
@@ -368,16 +385,24 @@ function updateOverlay({ phase, loaded, total, percent, followingCount, follower
   const followingEl = document.getElementById('igfd-following');
   const followersEl = document.getElementById('igfd-followers');
   const tipEl = document.getElementById('igfd-tip');
-  const closeBtn = document.getElementById('igfd-close-btn');
+  const avatarBox = document.getElementById('igfd-avatar');
+  const avatarImg = document.getElementById('igfd-avatar-img');
   const arrowHint = document.getElementById('igfd-arrow-hint');
+  const logoBox = document.querySelector('.igfd-logo');
   
+  const phaseTexts = {
+    'following': '📊 Collecting Following...',
+    'followers': '📊 Collecting Followers...',
+    'done': '✅ Done!',
+  };
   if (phaseEl && phase) {
-    const phaseTexts = {
-      'following': '📊 Collecting Following...',
-      'followers': '📊 Collecting Followers...',
-      'done': '✅ Done!',
-    };
-    phaseEl.textContent = phaseTexts[phase] || phase;
+    if (phase === 'done') {
+      phaseEl.textContent = phaseTexts[phase];
+    } else if (phaseTexts[phase]) {
+      phaseEl.textContent = phaseTexts[phase];
+    } else {
+      phaseEl.textContent = phase;
+    }
   }
   
   if (fillEl && typeof percent === 'number') {
@@ -404,13 +429,29 @@ function updateOverlay({ phase, loaded, total, percent, followingCount, follower
     tipEl.textContent = tipText;
   }
 
-  if (closeBtn) {
-    closeBtn.style.display = phase === 'done' ? 'inline-block' : 'none';
+  if (avatarBox && avatarImg) {
+    if (profilePicUrl) {
+      avatarImg.src = profilePicUrl;
+      avatarBox.style.display = 'block';
+      if (logoBox) logoBox.style.display = 'none'; // ocultar reloj cuando mostramos avatar final
+    } else {
+      avatarImg.src = '';
+      avatarBox.style.display = 'none';
+      if (logoBox) logoBox.style.display = 'flex';
+    }
   }
 
   if (arrowHint) {
     arrowHint.style.display = phase === 'done' ? 'flex' : 'none';
   }
+
+    // Mostrar el check solo cuando realmente terminamos, no durante unfollow/follow aislados
+    if (phaseEl && phase && (phase === 'following' || phase === 'followers')) {
+      phaseEl.textContent = phaseTexts[phase] || phase;
+    }
+    if (phaseEl && phase === 'done') {
+      phaseEl.textContent = '✅ Done!';
+    }
 }
 
 function nowISO() {
@@ -428,6 +469,27 @@ function sendLog(level, msg, data = {}) {
       ts: nowISO(),
     });
   } catch (_) {}
+}
+
+function describeElement(el) {
+  if (!el) return null;
+  let rect = {};
+  try {
+    rect = el.getBoundingClientRect() || {};
+  } catch (_) {}
+  return {
+    tag: el.tagName || null,
+    role: (el.getAttribute && el.getAttribute("role")) || null,
+    class: el.className || null,
+    text: normalizeText(el),
+    ariaLabel: (el.getAttribute && el.getAttribute("aria-label")) || null,
+    rect: {
+      x: Math.round(rect.x || 0),
+      y: Math.round(rect.y || 0),
+      width: Math.round(rect.width || 0),
+      height: Math.round(rect.height || 0),
+    },
+  };
 }
 
 function sendProgress({ phase, loaded, total, percent, text }) {
@@ -838,6 +900,7 @@ async function scrollCollect(type, hrefPart, retrying = false) {
     null;
 
   const total = Number.isFinite(totalGuess) ? totalGuess : 0;
+  EXPECTED_TOTALS[type] = total || EXPECTED_TOTALS[type] || 0;
 
   sendProgress({ phase: type, loaded: 0, total, percent: 0, text: `Collecting ${type}... 0%` });
 
@@ -922,6 +985,13 @@ async function scrollCollect(type, hrefPart, retrying = false) {
     // Salida rápida: si ya cargamos todo lo esperado, evitamos micro-scrolls
     if (total > 0 && loaded >= total) {
       sendLog("INFO", `Fin anticipado por total alcanzado (${type})`, { loaded, total });
+      // Scroll extra de seguridad para listas chicas
+      if (total <= 120) {
+        for (let j = 0; j < 3; j++) {
+          box.scrollTop = box.scrollHeight;
+          await sleep(800);
+        }
+      }
       break;
     }
 
@@ -946,7 +1016,7 @@ async function scrollCollect(type, hrefPart, retrying = false) {
         pauseLevel = 0;
       }
 
-      if (stable >= (smallList ? 2 : 6) && loaded >= Math.min(total || 0, 10)) {
+      if (stable >= (smallList ? 3 : 7) && loaded >= Math.min(total || 0, 10)) {
         sendLog("INFO", `Stop due to stable (${type})`, { loaded, stable, smallList });
         break;
       }
@@ -963,6 +1033,18 @@ async function scrollCollect(type, hrefPart, retrying = false) {
   if (total > 0 && finalUsers.length > total) {
     sendLog("WARN", "Trimming followers to expected total", { got: finalUsers.length, total });
     finalUsers = finalUsers.slice(0, total);
+  }
+  if (total > 0 && finalUsers.length < total && type === "following") {
+    if (!retrying) {
+      sendLog("WARN", "Following count below expected, retrying once", { got: finalUsers.length, total });
+      await closeDialog();
+      await sleep(800);
+      return await scrollCollect(type, hrefPart, true);
+    }
+    sendLog("WARN", "Following below expected after retry; keeping expected count for display", {
+      got: finalUsers.length,
+      total,
+    });
   }
   sendLog("INFO", `Users parsed (${type})`, { count: finalUsers.length });
 
@@ -1064,6 +1146,38 @@ async function navToOwnProfile() {
   throw new Error("Did not reach your profile in time. Open it manually and retry.");
 }
 
+function findProfilePicUrl(username) {
+  const isGood = (img) => {
+    if (!img) return null;
+    const src = img.currentSrc || img.src || "";
+    if (!src) return null;
+    // Evitar íconos pequeños o placeholders
+    const w = img.naturalWidth || img.width || 0;
+    if (w < 60) return null;
+    return src;
+  };
+
+  // 1) header img (perfil)
+  const headerImg = document.querySelector('header img');
+  const hSrc = isGood(headerImg);
+  if (hSrc) return hSrc;
+
+  // 2) img con alt que contenga el username
+  const imgs = Array.from(document.querySelectorAll('img[alt]'));
+  const match = imgs.find((img) => {
+    const alt = (img.getAttribute("alt") || "").toLowerCase();
+    return alt.includes(username.toLowerCase()) && isGood(img);
+  });
+  const mSrc = isGood(match);
+  if (mSrc) return mSrc;
+
+  // 3) cualquier img decente en el header
+  const anyGood = Array.from(document.querySelectorAll('header img')).map(isGood).find(Boolean);
+  if (anyGood) return anyGood;
+
+  return null;
+}
+
 // ============================================
 // UNFOLLOW FLOW
 // ============================================
@@ -1073,6 +1187,48 @@ function normalizeText(value) {
     .replace(/\s+/g, " ")
     .trim()
     .toLowerCase();
+}
+
+function isFollowingText(txt = "") {
+  return txt.includes("following") || txt.includes("siguiendo") || txt.includes("requested") || txt.includes("solicitado");
+}
+
+function isNotFollowingText(txt = "") {
+  const hasFollow = txt.includes("follow") || txt.includes("seguir");
+  return hasFollow && !isFollowingText(txt);
+}
+
+function findFollowButtonForFollowAction() {
+  const buttons = Array.from(document.querySelectorAll('button, div[role="button"]')).filter(isVisible);
+
+  const hasFollowBack = (btn) => normalizeText(btn.innerText || btn.textContent || "").includes("follow back");
+  const hasFollowOnly = (btn) => {
+    const t = normalizeText(btn);
+    return isNotFollowingText(t);
+  };
+
+  // Prioridad 1: texto Follow Back en cualquier hijo
+  const followBackBtn = buttons.find(hasFollowBack);
+  if (followBackBtn) return followBackBtn;
+
+  // Prioridad 2: texto/aria de seguir (sin following/requested)
+  const plainFollowBtn = buttons.find(hasFollowOnly);
+  if (plainFollowBtn) return plainFollowBtn;
+
+  const labelBtn = buttons.find((btn) => {
+    const label = normalizeText(btn.getAttribute("aria-label") || "");
+    return label.includes("follow back") || isNotFollowingText(label);
+  });
+  if (labelBtn) return labelBtn;
+
+  // Fallback: revisar todos los botones visibles por su innerText completo
+  const anyFollow = buttons.find((btn) => {
+    const txt = normalizeText(btn.innerText || btn.textContent || "");
+    return txt.includes("follow back") || isNotFollowingText(txt);
+  });
+  if (anyFollow) return anyFollow;
+
+  return null;
 }
 
 async function waitFor(fn, timeout = 12000, interval = 300) {
@@ -1111,7 +1267,14 @@ function findFollowButtonCandidate() {
     const txt = normalizeText(btn.innerText || btn.textContent || "");
     return txt.includes("following") || txt.includes("siguiendo");
   });
-  return deepBtn || null;
+  if (deepBtn) return deepBtn;
+
+  // Debug: no button found
+  sendLog("WARN", "FOLLOW_BUTTON_NOT_FOUND", {
+    candidates: buttons.length,
+    sampleTexts: buttons.slice(0, 5).map((b) => normalizeText(b)),
+  });
+  return null;
 }
 
 async function waitForFollowButton(timeout = 15000) {
@@ -1155,7 +1318,7 @@ async function waitForProfileReady(timeout = 15000) {
   }, timeout, 300);
 }
 
-async function unfollowUser(username) {
+async function unfollowUser(username, retried = false) {
   const clean = String(username || "").replace(/^@/, "").trim();
   if (!clean) throw new Error("Username missing");
   if (UNFOLLOW_RUNNING) throw new Error("Another unfollow is already running.");
@@ -1164,27 +1327,55 @@ async function unfollowUser(username) {
   try {
     await ensureOnProfile(clean);
     await waitForProfileReady(15000);
-    await sleep(400);
+    await sleep(200);
 
-    const btn = await waitForFollowButton(15000);
-    if (!btn) throw new Error("Follow/Following button not found.");
+    sendLog("INFO", "UNFOLLOW_START", { username: clean, href: location.href });
+    const avatarUrl = findProfilePicUrl(clean);
+
+    let btn = await waitForFollowButton(15000);
+    if (!btn) {
+      const buttons = Array.from(document.querySelectorAll('button, div[role="button"]')).length;
+      sendLog("ERROR", "UNFOLLOW_BTN_NOT_FOUND", { username: clean, buttonsCount: buttons, retried });
+      if (!retried) {
+        await sleep(800);
+        return await unfollowUser(username, true);
+      }
+      throw new Error(`Follow/Following button not found for @${clean}`);
+    }
+
+    // Algunos botones necesitan un pequeño delay antes de permitir el click
+    await sleep(1000);
 
     const btnText = normalizeText(btn);
-    sendLog("INFO", "UNFOLLOW_BTN", { text: btnText, username: clean });
+    sendLog("INFO", "UNFOLLOW_BTN", { text: btnText, username: clean, desc: describeElement(btn) });
 
-    if (btnText.includes("follow") || btnText.includes("seguir")) {
+    if (isNotFollowingText(btnText)) {
       return { ok: true, message: `Already not following @${clean}` };
     }
 
     // Intentar abrir el menú (Following) con reintentos cortos
     let confirm = null;
     for (let i = 0; i < 3; i++) {
+      sendLog("DEBUG", "UNFOLLOW_CLICK_ATTEMPT", { attempt: i + 1, username: clean });
       strongClick(btn);
       await sleep(600 + i * 200);
       confirm = await waitForUnfollowConfirm(1800 + i * 600);
       if (confirm) break;
     }
-    if (!confirm) throw new Error("Unfollow confirmation not found.");
+    if (!confirm) {
+      // Fallback: quizás el click ya cambió a "Follow"/"Follow Back"
+      const btnAfter = await waitForFollowButton(4000);
+      const tAfter = normalizeText(btnAfter || "");
+      if (btnAfter && isNotFollowingText(tAfter)) {
+        sendLog("WARN", "UNFOLLOW_CONFIRM_MISSING_BUT_STATE_CHANGED", { username: clean });
+        confirm = null;
+      } else {
+        sendLog("ERROR", "UNFOLLOW_CONFIRM_NOT_FOUND", { username: clean, btnTextAfter: tAfter });
+        throw new Error(`Unfollow confirmation not found for @${clean}`);
+      }
+    }
+
+    sendLog("INFO", "UNFOLLOW_CONFIRM_FOUND", { username: clean, desc: describeElement(confirm) });
 
     // Click en Unfollow con reintentos
     let confirmed = false;
@@ -1203,23 +1394,116 @@ async function unfollowUser(username) {
       }
     }
 
-    const finalState = confirmed
+    const finalFollowBtn = confirmed
       ? true
       : await waitFor(() => {
           const candidate = findFollowButtonCandidate();
           if (!candidate) return null;
           const t = normalizeText(candidate);
-          return t.includes("follow") || t.includes("seguir") ? candidate : null;
+          return isNotFollowingText(t) ? candidate : null;
         }, 10000, 300);
 
-    const ok = Boolean(finalState);
+    const ok = Boolean(finalFollowBtn);
     const message = ok
       ? `Unfollowed @${clean}`
-      : `Unfollowed @${clean} (could not confirm state)`;
-    sendLog("INFO", "UNFOLLOW_DONE_LOCAL", { username: clean, ok, message });
-    return { ok, message };
+      : `Unfollow failed for @${clean}: follow state not confirmed`;
+    sendLog(ok ? "INFO" : "ERROR", "UNFOLLOW_DONE_LOCAL", {
+      username: clean,
+      ok,
+      message,
+      finalFollowBtn: ok ? describeElement(finalFollowBtn) : null,
+      avatarUrl,
+    });
+    // Delay anti-rate-limit antes de devolver control
+    await sleep(1200);
+    if (ok) {
+      UNFOLLOW_COUNT += 1;
+      if (UNFOLLOW_COUNT >= 15) {
+        UNFOLLOW_COUNT = 0;
+        sendLog("WARN", "UNFOLLOW_COOLDOWN_NOTICE", { count: 15 });
+        try {
+          chrome.runtime.sendMessage({
+            type: "UNFOLLOW_COOLDOWN",
+            count: 15,
+            message: "You unfollowed 15 users. Wait a bit to avoid rate limits.",
+          });
+        } catch (_) {}
+      }
+    }
+    return { ok, message, avatarUrl };
   } finally {
     UNFOLLOW_RUNNING = false;
+  }
+}
+
+async function followUser(username) {
+  const clean = String(username || "").replace(/^@/, "").trim();
+  if (!clean) throw new Error("Username missing");
+  if (FOLLOW_RUNNING) throw new Error("Another follow is already running.");
+
+  FOLLOW_RUNNING = true;
+  try {
+    await ensureOnProfile(clean);
+    await waitForProfileReady(15000);
+    await sleep(400);
+
+    sendLog("INFO", "FOLLOW_START", { username: clean, href: location.href });
+    const avatarUrl = findProfilePicUrl(clean);
+
+    let btn = await waitFor(() => findFollowButtonForFollowAction(), 12000, 300);
+    if (!btn) {
+      const buttons = Array.from(document.querySelectorAll('button, div[role="button"]'));
+      sendLog("ERROR", "FOLLOW_BTN_NOT_FOUND", {
+        username: clean,
+        buttonsCount: buttons.length,
+        sampleTexts: buttons.slice(0, 8).map((b) => normalizeText(b.innerText || b.textContent || "")),
+      });
+      await sleep(800);
+      btn = await waitFor(() => findFollowButtonForFollowAction(), 8000, 300);
+    }
+    if (!btn) {
+      throw new Error("Follow button not found.");
+    }
+
+    let lastText = normalizeText(btn);
+    sendLog("INFO", "FOLLOW_BTN", { text: lastText, username: clean, desc: describeElement(btn) });
+
+    if (isFollowingText(lastText)) {
+      return { ok: true, message: `Already following @${clean}`, avatarUrl };
+    }
+
+    let confirmed = null;
+    for (let i = 0; i < 4; i++) {
+      const fresh = findFollowButtonForFollowAction();
+      if (fresh) btn = fresh;
+      try { btn.scrollIntoView({ block: "center", inline: "center" }); } catch (_) {}
+      lastText = normalizeText(btn);
+      sendLog("DEBUG", "FOLLOW_CLICK_ATTEMPT", { attempt: i + 1, username: clean, btnText: lastText, desc: describeElement(btn) });
+      strongClick(btn);
+      await sleep(600 + i * 300);
+      confirmed = await waitFor(() => {
+        const candidate = findFollowButtonCandidate();
+        if (!candidate) return null;
+        const t = normalizeText(candidate);
+        return isFollowingText(t) ? candidate : null;
+      }, 2000, 250);
+      if (confirmed) break;
+    }
+
+    const ok = Boolean(confirmed);
+    const message = ok ? `Followed @${clean}` : `Follow state not confirmed for @${clean}`;
+    sendLog(ok ? "INFO" : "WARN", "FOLLOW_DONE_LOCAL", {
+      username: clean,
+      ok,
+      message,
+      avatarUrl,
+      finalBtn: confirmed ? describeElement(confirmed) : null,
+      lastText,
+    });
+    await sleep(800);
+    return { ok, message, avatarUrl };
+  } finally {
+    FOLLOW_RUNNING = false;
   }
 }
 
@@ -1269,16 +1553,18 @@ async function runScan() {
     }
 
     const following = await scrollCollect("following", "/following");
+    const expectedFollowing = Math.max(following.length, EXPECTED_TOTALS.following || 0);
     
     // Actualizar contador de following
-    updateOverlay({ followingCount: following.length });
+    updateOverlay({ followingCount: expectedFollowing });
     
     await sleep(1300);
 
     const followers = await scrollCollect("followers", "/followers");
+    const expectedFollowers = Math.max(followers.length, EXPECTED_TOTALS.followers || 0);
     
     // Actualizar contador de followers
-    updateOverlay({ followersCount: followers.length });
+    updateOverlay({ followersCount: expectedFollowers });
 
     const noMeSiguen = following.filter((u) => !followers.includes(u)).sort();
     const noSigoYo = followers.filter((u) => !following.includes(u)).sort();
@@ -1288,20 +1574,22 @@ async function runScan() {
       followers: followers.length,
       noMeSiguen: noMeSiguen.length,
       noSigoYo: noSigoYo.length,
+      expectedFollowing,
+      expectedFollowers,
     });
     
     // Mostrar completado y mantener overlay visible
     updateOverlay({ 
       phase: 'done', 
       percent: 100,
-      followingCount: following.length,
-      followersCount: followers.length,
-      tipText: 'Finished. Close this window and review the report in the popup.'
+      followingCount: expectedFollowing,
+      followersCount: expectedFollowers,
+      tipText: 'Finished. You now can review the report in the popup.'
     });
 
     chrome.runtime.sendMessage({
       type: "RESULT",
-      result: { following, followers, noMeSiguen, noSigoYo },
+      result: { following, followers, noMeSiguen, noSigoYo, expectedFollowing, expectedFollowers },
     });
   } catch (err) {
     const msg = String(err?.message || err);
@@ -1348,10 +1636,25 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       if (msg.type === "UNFOLLOW") {
         const username = msg.username || "";
         try {
+          // Mantener el overlay visible mientras se hace unfollow (oculta la UI real)
+          showOverlay();
+          updateOverlay({
+            phase: "working",
+            percent: 100,
+            tipText: `Working... unfollowing @${username}`,
+            profilePicUrl: null,
+          });
+
           const res = await unfollowUser(username);
           try {
             chrome.runtime.sendMessage({ type: "UNFOLLOW_DONE", ok: true, username, message: res?.message });
           } catch (_) {}
+          updateOverlay({
+            phase: "done",
+            percent: 100,
+            tipText: res?.message || `Unfollowed @${username}`,
+            profilePicUrl: res?.avatarUrl || null,
+          });
           sendResponse({ ok: true, message: res?.message || "", result: res });
         } catch (err) {
           const message = String(err?.message || err);
@@ -1359,6 +1662,54 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           try {
             chrome.runtime.sendMessage({ type: "UNFOLLOW_DONE", ok: false, username, message });
           } catch (_) {}
+          // Mantener overlay con mensaje de error para no mostrar la UI real
+          showOverlay();
+          updateOverlay({
+            phase: "working",
+            percent: 100,
+            tipText: message,
+            profilePicUrl: null,
+          });
+          sendResponse({ ok: false, error: message });
+        }
+        return;
+      }
+
+      if (msg.type === "FOLLOW") {
+        const username = msg.username || "";
+        try {
+          showOverlay();
+          updateOverlay({
+            phase: "working",
+            percent: 100,
+            tipText: `Working... following @${username}`,
+            profilePicUrl: null,
+          });
+
+          const res = await followUser(username);
+          try {
+            chrome.runtime.sendMessage({ type: "FOLLOW_DONE", ok: true, username, message: res?.message });
+          } catch (_) {}
+          updateOverlay({
+            phase: "done",
+            percent: 100,
+            tipText: res?.message || `Followed @${username}`,
+            profilePicUrl: res?.avatarUrl || null,
+          });
+          sendResponse({ ok: true, message: res?.message || "", result: res });
+        } catch (err) {
+          const message = String(err?.message || err);
+          sendLog("ERROR", "FOLLOW_FAILED", { username, message });
+          try {
+            chrome.runtime.sendMessage({ type: "FOLLOW_DONE", ok: false, username, message });
+          } catch (_) {}
+          showOverlay();
+          updateOverlay({
+            phase: "working",
+            percent: 100,
+            tipText: message,
+            profilePicUrl: null,
+          });
           sendResponse({ ok: false, error: message });
         }
         return;
@@ -1384,13 +1735,6 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 });
 
 // Botón cerrar worker desde overlay
-document.addEventListener("click", (ev) => {
-  const target = ev.target;
-  if (target && target.id === "igfd-close-btn") {
-    try {
-      chrome.runtime.sendMessage({ type: "BG_CLEAR_WORKER" });
-    } catch (_) {}
-  }
-});
+document.addEventListener("click", () => {});
 
 sendLog("INFO", "content.js loaded", { url: location.href });

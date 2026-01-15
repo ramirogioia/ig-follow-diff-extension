@@ -19,16 +19,51 @@ const copyBtn = $("copyBtn");
 const downloadBtn = $("downloadBtn");
 const clearBtn = $("clearBtn");
 
-const logsBox = $("logsBox");
-const logsCopyBtn = $("logsCopyBtn");
-const logsClearBtn = $("logsClearBtn");
-
 const closeWorkerBtn = $("closeWorkerBtn");
 
 let currentState = null;
 let currentListType = "noMeSiguen"; // noMeSiguen | noSigoYo
 let cachedResults = { noMeSiguen: [], noSigoYo: [] };
 let copyHintTimer = null;
+let unfollowStatuses = {}; // { username: "working" | "done" | "error" }
+let localUnfollowLock = false; // bloquea clicks mientras se dispara unfollow
+const unfollowedLocally = new Set(); // usuarios removidos tras unfollow exitoso en esta sesión
+let followStatuses = {}; // { username: "working" | "done" | "error" }
+let localFollowLock = false;
+const followedLocally = new Set(); // usuarios marcados como seguidos en esta sesión
+let popupState = {
+  tab: "noMeSiguen",
+  scrolls: { noMeSiguen: 0, noSigoYo: 0 },
+};
+
+function savePopupState(partial = {}) {
+  popupState = {
+    ...popupState,
+    ...partial,
+    scrolls: { ...popupState.scrolls, ...(partial.scrolls || {}) },
+  };
+  chrome.storage.local.set({ IGFD_POPUP_STATE: popupState });
+}
+
+async function loadPopupState() {
+  const res = await new Promise((resolve) =>
+    chrome.storage.local.get({ IGFD_POPUP_STATE: popupState }, (r) => resolve(r?.IGFD_POPUP_STATE || popupState))
+  );
+  popupState = {
+    tab: res.tab || "noMeSiguen",
+    scrolls: {
+      noMeSiguen: res.scrolls?.noMeSiguen || 0,
+      noSigoYo: res.scrolls?.noSigoYo || 0,
+    },
+  };
+  currentListType = popupState.tab;
+}
+
+function applyScrollFromState() {
+  if (!noMeSiguenList) return;
+  const target = popupState.scrolls[currentListType] || 0;
+  noMeSiguenList.scrollTop = target;
+}
 
 function fmtLine(l) {
   const d = l.data ? "  " + JSON.stringify(l.data) : "";
@@ -42,8 +77,22 @@ async function getState() {
 }
 
 async function getLogs() {
+  // Intenta pedirle al service worker. Si falla (worker descargado),
+  // hace fallback directo al storage local.
   return new Promise((resolve) => {
-    chrome.runtime.sendMessage({ type: "GET_LOGS" }, (res) => resolve(res?.logs || []));
+    let done = false;
+    const timer = setTimeout(() => {
+      if (done) return;
+      done = true;
+      chrome.storage.local.get({ IGFD_LOGS: [] }, (res) => resolve(res.IGFD_LOGS || []));
+    }, 1500);
+
+    chrome.runtime.sendMessage({ type: "GET_LOGS" }, (res) => {
+      if (done) return;
+      clearTimeout(timer);
+      done = true;
+      resolve(res?.logs || []);
+    });
   });
 }
 
@@ -72,9 +121,10 @@ function setStatusUI(st) {
 
 function renderReport(st) {
   const r = st?.lastResult;
-  const noMeSiguen = r?.noMeSiguen || [];
-  const noSigoYo = r?.noSigoYo || [];
+  const noMeSiguen = (r?.noMeSiguen || []).filter((u) => !unfollowedLocally.has(u.toLowerCase()));
+  const noSigoYo = (r?.noSigoYo || []).filter((u) => !followedLocally.has(u.toLowerCase()));
   const unfollowState = st?.unfollow || { running: false, username: null };
+    const followState = st?.follow || { running: false, username: null };
   const hint = $("hint");
 
   if (hint) {
@@ -95,7 +145,7 @@ function renderReport(st) {
   if (!list.length) {
     const empty = document.createElement("div");
     empty.className = "hint";
-    empty.textContent = "No results yet. Click Scan. The report is shown here in the popup.";
+    empty.textContent = "No results to show. Click Scan to generate the report. Or you may already follow only people who follow you back.";
     noMeSiguenList.appendChild(empty);
     return;
   }
@@ -118,17 +168,46 @@ function renderReport(st) {
     const right = document.createElement("div");
     right.className = "right";
 
-    const unfollowBtn = document.createElement("button");
-    unfollowBtn.className = "btn small danger";
-    const isThisRunning = unfollowState.running && unfollowState.username === u;
-    unfollowBtn.textContent = isThisRunning ? "Working..." : "Unfollow";
-    unfollowBtn.disabled = Boolean(unfollowState.running);
-    unfollowBtn.addEventListener("click", async () => {
-      unfollowBtn.disabled = true;
-      unfollowBtn.textContent = "Working...";
-      await new Promise((resolve) =>
-        chrome.runtime.sendMessage({ type: "UNFOLLOW", username: u }, () => resolve(true))
+    const actionBtn = document.createElement("button");
+    const isUnfollowMode = currentListType !== "noSigoYo";
+    const statusMap = isUnfollowMode ? unfollowStatuses : followStatuses;
+    const localLock = isUnfollowMode ? () => localUnfollowLock : () => localFollowLock;
+    const setLocalLock = isUnfollowMode ? (v) => (localUnfollowLock = v) : (v) => (localFollowLock = v);
+    actionBtn.className = "btn small " + (isUnfollowMode ? "danger" : "primary");
+    const status = statusMap[u] || null;
+    const isThisRunning = isUnfollowMode
+      ? unfollowState.running && unfollowState.username === u
+      : followState.running && followState.username === u;
+    const globalRunning = (isUnfollowMode ? localUnfollowLock : localFollowLock) || Boolean(unfollowState.running || followState.running);
+    const isWorking = status === "working" || isThisRunning;
+    const isDone = status === "done";
+    const isError = status === "error";
+    const baseLabel = isUnfollowMode ? "Unfollow" : "Follow";
+    const doneLabel = isUnfollowMode ? "Unfollowed" : "Followed";
+    const workingLabel = isUnfollowMode ? "Working..." : "Following...";
+    actionBtn.textContent = isDone ? doneLabel : isWorking ? workingLabel : isError ? "Error" : baseLabel;
+    actionBtn.disabled = isWorking || isDone || globalRunning;
+    actionBtn.addEventListener("click", async () => {
+      console.log("[IGFD] Action click", { mode: isUnfollowMode ? "UNFOLLOW" : "FOLLOW", username: u });
+      setLocalLock(true);
+      statusMap[u] = "working";
+      actionBtn.disabled = true;
+      actionBtn.textContent = workingLabel;
+      const type = isUnfollowMode ? "UNFOLLOW" : "FOLLOW";
+      const res = await new Promise((resolve) =>
+        chrome.runtime.sendMessage({ type, username: u }, (r) => resolve(r))
       );
+      console.log("[IGFD] Action response", { username: u, mode: type, res });
+      if (res?.ok) {
+        statusMap[u] = "done";
+        actionBtn.textContent = doneLabel;
+        actionBtn.disabled = true;
+      } else {
+        statusMap[u] = "error";
+        actionBtn.textContent = "Error";
+        actionBtn.disabled = false; // permitir reintento
+      }
+      setLocalLock(false);
       await refreshAll();
     });
 
@@ -139,18 +218,27 @@ function renderReport(st) {
       chrome.tabs.create({ url: `https://www.instagram.com/${u}/` });
     });
 
-    right.appendChild(unfollowBtn);
+    right.appendChild(actionBtn);
     right.appendChild(open);
 
     row.appendChild(left);
     row.appendChild(right);
     noMeSiguenList.appendChild(row);
   }
+
+  if (!noMeSiguenList.dataset.scrollHandler) {
+    noMeSiguenList.addEventListener("scroll", () => {
+      popupState.scrolls[currentListType] = noMeSiguenList.scrollTop;
+      savePopupState({ scrolls: popupState.scrolls });
+    });
+    noMeSiguenList.dataset.scrollHandler = "1";
+  }
+
+  applyScrollFromState();
 }
 
 async function renderLogs() {
-  const logs = await getLogs();
-  logsBox.textContent = logs.map(fmtLine).join("\n");
+  // Logs ocultos
 }
 
 async function refreshAll() {
@@ -171,6 +259,9 @@ function setupTabs() {
       const id = t.dataset.tab;
       document.querySelectorAll(".panel").forEach((p) => p.classList.remove("active"));
       document.getElementById(id).classList.add("active");
+      if (id === "logs") {
+        renderLogs();
+      }
     });
   });
 }
@@ -181,6 +272,7 @@ function setupChips() {
     if (chipNoMeSiguen) chipNoMeSiguen.classList.toggle("active", type === "noMeSiguen");
     if (chipNoSigoYo) chipNoSigoYo.classList.toggle("active", type === "noSigoYo");
     renderReport(currentState);
+    savePopupState({ tab: currentListType, scrolls: popupState.scrolls });
   };
   if (chipNoMeSiguen) {
     chipNoMeSiguen.addEventListener("click", () => activate("noMeSiguen"));
@@ -188,7 +280,7 @@ function setupChips() {
   if (chipNoSigoYo) {
     chipNoSigoYo.addEventListener("click", () => activate("noSigoYo"));
   }
-  activate("noMeSiguen");
+  activate(popupState.tab || "noMeSiguen");
 }
 
 function xmlEscape(str) {
@@ -298,17 +390,11 @@ clearBtn.addEventListener("click", async () => {
       unfollow: { running: false, username: null },
     }
   });
+  unfollowStatuses = {};
+  unfollowedLocally.clear();
+  followStatuses = {};
+  followedLocally.clear();
   await refreshAll();
-});
-
-logsCopyBtn.addEventListener("click", async () => {
-  const logs = await getLogs();
-  await navigator.clipboard.writeText(logs.map(fmtLine).join("\n"));
-});
-
-logsClearBtn.addEventListener("click", async () => {
-  await new Promise((resolve) => chrome.runtime.sendMessage({ type: "CLEAR_LOGS" }, () => resolve(true)));
-  await renderLogs();
 });
 
 closeWorkerBtn.addEventListener("click", async () => {
@@ -316,10 +402,29 @@ closeWorkerBtn.addEventListener("click", async () => {
   await refreshAll();
 });
 
-setupTabs();
-setupChips();
-setupDownload();
-refreshAll();
+chrome.runtime.onMessage.addListener((msg) => {
+  if (msg?.type === "UNFOLLOW_COOLDOWN") {
+    const text = msg?.message || "Pause unfollows for a few minutes to avoid rate limits.";
+    statusText.textContent = text;
+  }
+  if (msg?.type === "UNFOLLOW_DONE" && msg.ok && msg.username) {
+    unfollowedLocally.add(String(msg.username).toLowerCase());
+    refreshAll();
+  }
+  if (msg?.type === "FOLLOW_DONE" && msg.ok && msg.username) {
+    followedLocally.add(String(msg.username).toLowerCase());
+    refreshAll();
+  }
+  console.log("[IGFD] runtime message", msg);
+});
 
-// auto-refresh mientras está abierto
-setInterval(refreshAll, 900);
+(async () => {
+  await loadPopupState();
+  setupTabs();
+  setupChips();
+  setupDownload();
+  await refreshAll();
+  applyScrollFromState();
+  // auto-refresh mientras está abierto
+  setInterval(refreshAll, 900);
+})();

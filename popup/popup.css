@@ -55,6 +55,11 @@ body {
 .btn.primary:hover { filter: brightness(1.05); }
 .btn.danger { background: rgba(239,68,68,0.15); border-color: rgba(239,68,68,0.35); }
 .btn.small { padding: 6px 8px; font-size: 12px; border-radius: 9px; }
+.btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+  pointer-events: none;
+}
 
 .progress {
   margin-top: 10px;
@@ -154,6 +159,10 @@ body {
   color: var(--muted);
   font-size: 12px;
 }
+.hint.danger {
+  color: #f29863; /* rojo suave tirando a naranja */
+  border-color: rgba(255,255,255,0.18); /* mantiene el borde original */
+}
 
 .list {
   display: flex;
@@ -211,5 +220,53 @@ body {
 .foot {
   margin-top: 10px;
   display: flex;
-  justify-content: flex-end;
+  justify-content: space-between;
+  align-items: center;
+}
+.risk-wrap {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.risk-icon {
+  position: relative;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: 1px solid var(--line);
+  color: var(--text);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 800;
+  font-size: 12px;
+  cursor: default;
+  background: rgba(255,255,255,0.06);
+}
+.risk-icon:focus {
+  outline: 2px solid var(--primary);
+}
+.risk-tooltip {
+  position: absolute;
+  left: 0;
+  bottom: 28px;
+  min-width: 240px;
+  max-width: 280px;
+  padding: 10px;
+  border-radius: 10px;
+  background: rgba(0,0,0,0.85);
+  color: #f5f6fa;
+  font-size: 11px;
+  line-height: 1.4;
+  border: 1px solid rgba(255,255,255,0.12);
+  box-shadow: 0 10px 24px rgba(0,0,0,0.25);
+  pointer-events: none;
+  opacity: 0;
+  transform: translateY(4px);
+  transition: opacity 120ms ease, transform 120ms ease;
+}
+.risk-icon:hover .risk-tooltip,
+.risk-icon:focus .risk-tooltip {
+  opacity: 1;
+  transform: translateY(0);
 }

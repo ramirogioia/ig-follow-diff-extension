@@ -6,9 +6,10 @@
 
 const STORAGE_KEY = "IGFD_STATE";
 const DEFAULT_UNFOLLOW_STATE = { running: false, username: null };
+const DEFAULT_FOLLOW_STATE = { running: false, username: null };
 
 const DEFAULT_STATE = {
-  status: "idle", // idle | running | error | done | unfollowing
+  status: "idle", // idle | running | error | done | unfollowing | follow
   text: "",
   updatedAt: Date.now(),
   lastResult: null, // {following, followers, noMeSiguen, noSigoYo} keys stored
@@ -21,6 +22,7 @@ const DEFAULT_STATE = {
   progress: { phase: "", loaded: 0, total: 0, percent: 0 },
   profileHref: null,
   unfollow: { ...DEFAULT_UNFOLLOW_STATE },
+  follow: { ...DEFAULT_FOLLOW_STATE },
 };
 
 let state = { ...DEFAULT_STATE };
@@ -373,6 +375,7 @@ async function stopAll() {
     workerTabId: null,
     workerWindowIds: state.workerWindowIds,
     unfollow: { ...DEFAULT_UNFOLLOW_STATE },
+    follow: { ...DEFAULT_FOLLOW_STATE },
   });
 }
 
@@ -386,7 +389,43 @@ async function clearAllWorkers() {
     dropWorkerWindowId(wid);
   }
   await clearWorker(true);
-  await setState({ status: "idle", text: "", workerWindowIds: [] });
+  await setState({
+    status: "idle",
+    text: "",
+    workerWindowIds: [],
+    unfollow: { ...DEFAULT_UNFOLLOW_STATE },
+    follow: { ...DEFAULT_FOLLOW_STATE },
+  });
+}
+
+async function ensureUnfollowTab(username) {
+  await loadState();
+
+  const profileUrl = `https://www.instagram.com/${encodeURIComponent(username)}/`;
+
+  // If we already have a worker tab, check if it's responsive
+  if (state.workerTabId) {
+    const ready = await ensureContentReady(state.workerTabId, 8000);
+    if (ready) return state.workerTabId;
+  }
+
+  // Create a fresh background tab for this unfollow
+  const tab = await chrome.tabs.create({ url: profileUrl, active: false });
+  const tabId = tab.id;
+  const windowId = tab.windowId;
+  if (windowId) addWorkerWindowId(windowId);
+
+  await setState({
+    workerTabId: tabId,
+    workerWindowId: windowId || null,
+    workerWindowIds: state.workerWindowIds,
+    profileHref: `/${username}/`,
+  });
+
+  const ready = await ensureContentReady(tabId, 25000);
+  if (!ready) throw new Error("Could not communicate with the unfollow tab.");
+
+  return tabId;
 }
 
 chrome.runtime.onInstalled.addListener(async () => {
@@ -420,7 +459,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
       if (msg.type === "BG_CLEAR_WORKER") {
         await clearWorker(true);
-        await setState({ status: "idle", text: "", unfollow: { ...DEFAULT_UNFOLLOW_STATE } });
+        await setState({
+          status: "idle",
+          text: "",
+          unfollow: { ...DEFAULT_UNFOLLOW_STATE },
+          follow: { ...DEFAULT_FOLLOW_STATE },
+        });
         sendResponse({ ok: true });
         return;
       }
@@ -440,8 +484,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           return;
         }
 
-        const workerTabId = state.workerTabId;
-        if (!workerTabId) {
+        const tabId = state.workerTabId;
+        if (!tabId) {
+          log("ERROR", "UNFOLLOW_NO_WORKER_TAB", { username });
           sendResponse({ ok: false, error: "Worker not available. Run a scan again." });
           return;
         }
@@ -453,13 +498,27 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         });
 
         try {
-          const res = await sendToTab(workerTabId, { type: "UNFOLLOW", username });
+          let res = null;
+          try {
+            log("INFO", "UNFOLLOW_SEND", { tabId, username });
+            res = await sendToTab(tabId, { type: "UNFOLLOW", username });
+          } catch (err) {
+            // Reintento simple en el mismo tab por si estaba dormido
+            const ready = await ensureContentReady(tabId, 8000);
+            if (!ready) {
+              log("ERROR", "UNFOLLOW_SEND_RETRY_READY_FAIL", { username, err: String(err) });
+              throw err;
+            }
+            log("WARN", "UNFOLLOW_SEND_RETRYING", { username, err: String(err) });
+            res = await sendToTab(tabId, { type: "UNFOLLOW", username });
+          }
           const message = res?.message || `Unfollowed @${username}`;
           await setState({
             status: "done",
             text: message,
             unfollow: { ...DEFAULT_UNFOLLOW_STATE },
           });
+          log("INFO", "UNFOLLOW_DONE_BG", { username, ok: Boolean(res?.ok), message });
           sendResponse({ ok: true, result: res, message });
         } catch (err) {
           const message = String(err);
@@ -468,6 +527,64 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             text: message,
             unfollow: { ...DEFAULT_UNFOLLOW_STATE },
           });
+          log("ERROR", "UNFOLLOW_FAILED_BG", { username, message });
+          sendResponse({ ok: false, error: message });
+        }
+        return;
+      }
+
+      if (msg.type === "FOLLOW") {
+        await loadState();
+        const username = (msg.username || "").trim();
+
+        if (!username) {
+          sendResponse({ ok: false, error: "Username missing" });
+          return;
+        }
+
+        const tabId = state.workerTabId;
+        if (!tabId) {
+          log("ERROR", "FOLLOW_NO_WORKER_TAB", { username });
+          sendResponse({ ok: false, error: "Worker not available. Run a scan again." });
+          return;
+        }
+
+        await setState({
+          status: "follow",
+          text: `Following @${username}...`,
+          follow: { running: true, username },
+        });
+
+        try {
+          let res = null;
+          try {
+            log("INFO", "FOLLOW_SEND", { tabId, username });
+            res = await sendToTab(tabId, { type: "FOLLOW", username });
+          } catch (err) {
+            const ready = await ensureContentReady(tabId, 8000);
+            if (!ready) {
+              log("ERROR", "FOLLOW_SEND_RETRY_READY_FAIL", { username, err: String(err) });
+              throw err;
+            }
+            log("WARN", "FOLLOW_SEND_RETRYING", { username, err: String(err) });
+            res = await sendToTab(tabId, { type: "FOLLOW", username });
+          }
+          const message = res?.message || `Followed @${username}`;
+          await setState({
+            status: "done",
+            text: message,
+            follow: { ...DEFAULT_FOLLOW_STATE },
+          });
+          log("INFO", "FOLLOW_DONE_BG", { username, ok: Boolean(res?.ok), message });
+          sendResponse({ ok: true, result: res, message });
+        } catch (err) {
+          const message = String(err);
+          await setState({
+            status: "error",
+            text: message,
+            follow: { ...DEFAULT_FOLLOW_STATE },
+          });
+          log("ERROR", "FOLLOW_FAILED_BG", { username, message });
           sendResponse({ ok: false, error: message });
         }
         return;
