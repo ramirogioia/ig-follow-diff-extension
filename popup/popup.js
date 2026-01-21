@@ -47,7 +47,7 @@ let cooldownActive = false;
 let cooldownTimer = null;
 let cooldownEndTime = null;
 const ACTION_LIMIT = 17;
-const COOLDOWN_DURATION_MS = 3 * 60 * 1000; // 3 minutos
+const COOLDOWN_DURATION_MS = (3 * 60 + 45) * 1000; // 3 minutos 45 segundos
 const STORAGE_KEY_COOLDOWN = "IGFD_COOLDOWN_STATE";
 
 const STORAGE_KEY_EXCLUDED = "IGFD_EXCLUDED_USERS";

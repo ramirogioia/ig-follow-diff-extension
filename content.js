@@ -941,6 +941,14 @@ async function scrollCollect(type, hrefPart, retrying = false) {
   await kickstartScrollable(box);
 
   sendLog("INFO", `Scrolling ${type}...`, {});
+  
+  // Scroll adicional al inicio para asegurar que los primeros usuarios se carguen
+  // A veces Instagram no renderiza los primeros usuarios hasta hacer scroll
+  box.scrollTop = 0;
+  await sleep(500);
+  box.scrollTop = box.scrollHeight;
+  await sleep(800);
+  
   let prevHeight = box.scrollHeight;
   let stable = 0;
   let lastLoaded = 0;
@@ -973,13 +981,33 @@ async function scrollCollect(type, hrefPart, retrying = false) {
     box.scrollTop = box.scrollHeight;
     await sleep(900 + Math.random() * 600);
 
-    // Contar con 'a[href^="/"] span' como en la versión que funcionaba
-    const loaded = dialog.querySelectorAll('a[href^="/"] span').length;
+    // Contar usuarios de forma más simple y rápida durante el scroll
+    // Contar anchors que parecen ser perfiles de usuario (sin parsear completo)
+    const allAnchors = dialog.querySelectorAll('a[href^="/"], a[href^="https://www.instagram.com/"]');
+    // Filtrar solo los que parecen ser perfiles (tienen /username/ o /username)
+    let userAnchorCount = 0;
+    const seenHrefs = new Set();
+    for (const a of allAnchors) {
+      const href = a.getAttribute("href") || "";
+      // Normalizar href rápido
+      let h = href.replace("https://www.instagram.com", "").split("?")[0].split("#")[0];
+      if (!h.startsWith("/")) continue;
+      const parts = h.split("/").filter(Boolean);
+      if (parts.length === 0 || parts.length > 1) continue; // Solo perfiles de 1 nivel
+      const user = parts[0].toLowerCase();
+      // Blacklist rápida
+      if (["explore", "reels", "direct", "accounts", "notifications", "messages", "inbox", "tv", "p", "stories", "instagram"].includes(user)) continue;
+      if (SELF_USERNAME && user === SELF_USERNAME.toLowerCase()) continue;
+      if (seenHrefs.has(h)) continue;
+      seenHrefs.add(h);
+      userAnchorCount++;
+    }
+    const loaded = userAnchorCount;
 
     let percent = 0;
     if (total > 0) percent = Math.max(0, Math.min(100, Math.round((loaded / total) * 100)));
 
-    sendLog("DEBUG", `${type}: ${loaded} loaded...`, { percent, i });
+    sendLog("DEBUG", `${type}: ${loaded} loaded...`, { percent, i, total });
     sendProgress({ phase: type, loaded, total, percent, text: `Collecting ${type}... ${percent}%` });
 
     // Salida rápida: si ya cargamos todo lo esperado, evitamos micro-scrolls
@@ -992,6 +1020,8 @@ async function scrollCollect(type, hrefPart, retrying = false) {
           await sleep(800);
         }
       }
+      // Enviar progreso final al 100% antes de parsear
+      sendProgress({ phase: type, loaded: total, total, percent: 100, text: `Collecting ${type}... 100%` });
       break;
     }
 
@@ -1018,6 +1048,10 @@ async function scrollCollect(type, hrefPart, retrying = false) {
 
       if (stable >= (smallList ? 3 : 7) && loaded >= Math.min(total || 0, 10)) {
         sendLog("INFO", `Stop due to stable (${type})`, { loaded, stable, smallList });
+        // Enviar progreso final al 100% basado en el total esperado (no en lo parseado)
+        if (total > 0) {
+          sendProgress({ phase: type, loaded: total, total, percent: 100, text: `Collecting ${type}... 100%` });
+        }
         break;
       }
     } else {
@@ -1029,24 +1063,119 @@ async function scrollCollect(type, hrefPart, retrying = false) {
     lastLoaded = loaded;
   }
 
+  // Antes de parsear, hacer scrolls finales adicionales para asegurar que todos los usuarios estén cargados
+  if (box && scrollable && total > 0) {
+    sendLog("INFO", `Final scrolls to ensure all users loaded (${type})`, { total });
+    // Hacer varios scrolls suaves al final para asegurar que se carguen todos los usuarios
+    // Esto es importante porque Instagram puede tener usuarios al final que no se renderizan hasta hacer scroll completo
+    for (let finalScroll = 0; finalScroll < 5; finalScroll++) {
+      box.scrollTop = box.scrollHeight;
+      await sleep(600);
+      // Pequeño scroll hacia arriba y abajo para forzar renderizado de todos los elementos
+      box.scrollTop -= 100;
+      await sleep(300);
+      box.scrollTop = box.scrollHeight;
+      await sleep(600);
+    }
+    
+    // También hacer scroll al inicio para asegurar que los primeros usuarios estén cargados
+    // A veces Instagram no renderiza los primeros usuarios hasta hacer scroll hacia arriba
+    sendLog("INFO", `Final scroll to top to ensure first users loaded (${type})`, { total });
+    box.scrollTop = 0;
+    await sleep(800);
+    box.scrollTop = box.scrollHeight;
+    await sleep(800);
+  }
+  
+  // Contar usuarios en el DOM antes de parsear (para comparar)
+  const allAnchorsBefore = dialog.querySelectorAll('a[href^="/"], a[href^="https://www.instagram.com/"]');
+  let userAnchorCountBefore = 0;
+  const seenHrefsBefore = new Set();
+  for (const a of allAnchorsBefore) {
+    const href = a.getAttribute("href") || "";
+    let h = href.replace("https://www.instagram.com", "").split("?")[0].split("#")[0];
+    if (!h.startsWith("/")) continue;
+    const parts = h.split("/").filter(Boolean);
+    if (parts.length === 0 || parts.length > 1) continue;
+    const user = parts[0].toLowerCase();
+    if (["explore", "reels", "direct", "accounts", "notifications", "messages", "inbox", "tv", "p", "stories", "instagram"].includes(user)) continue;
+    if (SELF_USERNAME && user === SELF_USERNAME.toLowerCase()) continue;
+    if (seenHrefsBefore.has(h)) continue;
+    seenHrefsBefore.add(h);
+    userAnchorCountBefore++;
+  }
+  const actualLoaded = userAnchorCountBefore;
+  
   let finalUsers = parseUsersFromDialog(dialog, { allowTextFallback: false });
+  
   if (total > 0 && finalUsers.length > total) {
     sendLog("WARN", "Trimming followers to expected total", { got: finalUsers.length, total });
     finalUsers = finalUsers.slice(0, total);
   }
-  if (total > 0 && finalUsers.length < total && type === "following") {
-    if (!retrying) {
-      sendLog("WARN", "Following count below expected, retrying once", { got: finalUsers.length, total });
-      await closeDialog();
-      await sleep(800);
-      return await scrollCollect(type, hrefPart, true);
-    }
-    sendLog("WARN", "Following below expected after retry; keeping expected count for display", {
-      got: finalUsers.length,
+  
+  // Solo retry si realmente no se scrapearon suficientes usuarios (no si fueron filtrados)
+  // Si se scrapearon suficientes usuarios pero fueron filtrados, es normal
+  const loadedEnough = actualLoaded >= total * 0.90; // Al menos 90% del total esperado cargado
+  const parsedEnough = finalUsers.length >= total * 0.90; // Al menos 90% parseado
+  
+  if (total > 0 && type === "following" && !retrying && !loadedEnough) {
+    // Solo retry si realmente no se cargaron suficientes usuarios en el DOM
+    sendLog("WARN", "Following count below expected, retrying once", { 
+      got: finalUsers.length, 
+      actualLoaded,
       total,
+      loadedEnough,
+      parsedEnough 
+    });
+    await closeDialog();
+    await sleep(800);
+    return await scrollCollect(type, hrefPart, true);
+  }
+  
+  if (total > 0 && finalUsers.length < total) {
+    sendLog("WARN", `${type} count below expected (some users may have been filtered)`, {
+      got: finalUsers.length,
+      actualLoaded,
+      total,
+      filtered: actualLoaded - finalUsers.length,
     });
   }
-  sendLog("INFO", `Users parsed (${type})`, { count: finalUsers.length });
+  
+  // Enviar progreso final del 100% basado en el total esperado (no en los parseados)
+  // Esto asegura que la barra llegue al 100% incluso si algunos usuarios fueron filtrados
+  sendProgress({ 
+    phase: type, 
+    loaded: total, 
+    total, 
+    percent: 100, 
+    text: `Collecting ${type}... 100%` 
+  });
+  
+  // Logging detallado para debug
+  if (total > 0 && finalUsers.length < total) {
+    const allAnchorsForDebug = Array.from(dialog.querySelectorAll('a[href^="/"], a[href^="https://www.instagram.com/"]'));
+    const allHrefs = allAnchorsForDebug.map(a => a.getAttribute("href")).filter(Boolean).slice(0, 50);
+    const parsedUsersLower = finalUsers.map(u => u.toLowerCase());
+    const missingCount = total - finalUsers.length;
+    
+    sendLog("WARN", `Users missing after parse (${type})`, {
+      expected: total,
+      parsed: finalUsers.length,
+      anchorsInDOM: allAnchorsForDebug.length,
+      userAnchorsInDOM: actualLoaded,
+      missing: missingCount,
+      sampleHrefs: allHrefs.slice(0, 10),
+      parsedUsersSample: finalUsers.slice(0, 10),
+    });
+  }
+  
+  sendLog("INFO", `Users parsed (${type})`, { 
+    count: finalUsers.length, 
+    total, 
+    actualLoaded,
+    difference: total - finalUsers.length,
+    parsedVsLoaded: finalUsers.length - actualLoaded
+  });
 
   await closeDialog();
   await sleep(650);
