@@ -13,6 +13,7 @@ const DEFAULT_STATE = {
   text: "",
   updatedAt: Date.now(),
   lastResult: null, // {following, followers, noMeSiguen, noSigoYo} keys stored
+  lastResultTimestamp: null, // Timestamp de cuándo se generó el último resultado
   workerWindowId: null,
   workerTabId: null,
   workerWindowIds: [],
@@ -24,6 +25,10 @@ const DEFAULT_STATE = {
   unfollow: { ...DEFAULT_UNFOLLOW_STATE },
   follow: { ...DEFAULT_FOLLOW_STATE },
 };
+
+
+// Tiempo de expiración de resultados en milisegundos (8 horas)
+const RESULT_EXPIRATION_MS = 8 * 60 * 60 * 1000;
 
 let state = { ...DEFAULT_STATE };
 
@@ -54,7 +59,31 @@ function log(level, msg, data = {}) {
 
 async function loadState() {
   const res = await chrome.storage.local.get(STORAGE_KEY);
-  if (res && res[STORAGE_KEY]) state = { ...DEFAULT_STATE, ...res[STORAGE_KEY] };
+  if (res && res[STORAGE_KEY]) {
+    state = { ...DEFAULT_STATE, ...res[STORAGE_KEY] };
+    // Limpiar resultados si son antiguos (más de 8 horas)
+    await checkAndCleanExpiredResults();
+  }
+}
+
+async function checkAndCleanExpiredResults() {
+  if (!state.lastResult || !state.lastResultTimestamp) return;
+  
+  const now = Date.now();
+  const age = now - state.lastResultTimestamp;
+  
+  if (age > RESULT_EXPIRATION_MS) {
+    log("INFO", "Limpiando resultados expirados por tiempo", {
+      ageHours: Math.round(age / (60 * 60 * 1000)),
+      expirationHours: RESULT_EXPIRATION_MS / (60 * 60 * 1000),
+    });
+    await setState({
+      lastResult: null,
+      lastResultTimestamp: null,
+      status: "idle",
+      text: "",
+    });
+  }
 }
 
 async function saveState() {
@@ -137,6 +166,149 @@ async function ensureContentReady(tabId, timeoutMs = 20000) {
     await new Promise((r) => setTimeout(r, 300));
   }
   return false;
+}
+
+async function ensureWorkerForAction() {
+  await loadState();
+  
+  // Verificar si el worker existe y está disponible
+  if (state.workerWindowId && state.workerTabId) {
+    try {
+      const workerWindow = await chrome.windows.get(state.workerWindowId);
+      
+      if (workerWindow.state === "minimized") {
+        // Restaurar ventana minimizada
+        await chrome.windows.update(state.workerWindowId, { state: "normal" });
+      }
+
+      try {
+        const tab = await chrome.tabs.get(state.workerTabId);
+        if (tab && tab.url && tab.url.includes("instagram.com")) {
+          // Worker existe y está bien
+          return { available: true };
+        }
+      } catch (err) {
+        // Tab no existe, continuar para crear uno nuevo
+      }
+    } catch (err) {
+      // Window no existe, continuar para crear uno nuevo
+    }
+  }
+
+  // Si no hay worker disponible pero hay resultados del scan, crear uno nuevo
+  if (!state.lastResult) {
+    return { available: false, reason: "Worker window not found. Please run a scan first." };
+  }
+
+  // Crear un nuevo worker para FOLLOW/UNFOLLOW
+  log("INFO", "Creating new worker for FOLLOW/UNFOLLOW", {});
+  
+  try {
+    // Limpiar worker anterior si existe
+    await clearWorker(false);
+
+    // Buscar una tab de Instagram para usar como referencia
+    const instagramTabs = await chrome.tabs.query({ url: "https://www.instagram.com/*" });
+    const activeTab = instagramTabs.length > 0 ? instagramTabs[0] : null;
+    
+    if (!activeTab) {
+      return { available: false, reason: "Please open Instagram in a tab first." };
+    }
+
+    const origWin = await chrome.windows.get(activeTab.windowId);
+    const origBounds = {
+      left: origWin.left ?? 0,
+      top: origWin.top ?? 0,
+      width: origWin.width ?? 1920,
+      height: origWin.height ?? 900,
+    };
+
+    // Usar el profileHref guardado o detectar de la tab activa
+    let workerUrl = "https://www.instagram.com/";
+    const href = state.profileHref;
+    if (href) {
+      workerUrl = href.startsWith("https://") ? href : `https://www.instagram.com${href}`;
+    } else if (activeTab.url && activeTab.url.startsWith("https://www.instagram.com/")) {
+      workerUrl = activeTab.url;
+    }
+
+    // Crear worker window (más pequeño, solo para FOLLOW/UNFOLLOW)
+    const workerWin = await chrome.windows.create({
+      url: workerUrl,
+      type: "normal",
+      focused: false,
+      width: 400,
+      height: 600,
+      left: (origBounds.left ?? 0) + (origBounds.width ?? 1920) - 400,
+      top: origBounds.top ?? 0,
+    });
+
+    const workerTabId = workerWin.tabs?.[0]?.id;
+    if (!workerTabId) {
+      await chrome.windows.remove(workerWin.id);
+      return { available: false, reason: "Could not create worker tab." };
+    }
+
+    addWorkerWindowId(workerWin.id);
+
+    await setState({
+      workerWindowId: workerWin.id,
+      workerTabId,
+      workerWindowIds: state.workerWindowIds,
+    });
+
+    // Esperar a que el contenido esté listo
+    const ready = await ensureContentReady(workerTabId, 20000);
+    if (!ready) {
+      await chrome.windows.remove(workerWin.id);
+      await setState({ workerWindowId: null, workerTabId: null });
+      return { available: false, reason: "Worker window is not responding. Please try again." };
+    }
+
+    // Esperar un poco para que Instagram cargue
+    await new Promise((r) => setTimeout(r, 1000));
+
+    log("INFO", "Worker created for FOLLOW/UNFOLLOW", { workerTabId, workerWindowId: workerWin.id });
+    return { available: true };
+  } catch (err) {
+    log("ERROR", "Failed to create worker for FOLLOW/UNFOLLOW", { err: String(err) });
+    return { available: false, reason: `Failed to create worker: ${String(err)}` };
+  }
+}
+
+async function checkWorkerAvailable() {
+  await loadState();
+  
+  if (!state.workerWindowId || !state.workerTabId) {
+    return { available: false, reason: "Worker window not found. Please run a scan first." };
+  }
+
+  try {
+    // Verificar si la ventana existe y no está minimizada
+    const workerWindow = await chrome.windows.get(state.workerWindowId);
+    
+    if (workerWindow.state === "minimized") {
+      return { available: false, reason: "Worker window is minimized. Please restore it to continue." };
+    }
+
+    // Verificar si el tab existe y está en Instagram
+    try {
+      const tab = await chrome.tabs.get(state.workerTabId);
+      if (!tab || tab.url === "chrome://newtab/" || !tab.url.includes("instagram.com")) {
+        return { available: false, reason: "Worker tab is not available. Please run a scan again." };
+      }
+    } catch (err) {
+      return { available: false, reason: "Worker tab not found. Please run a scan again." };
+    }
+
+    // No verificar si el contenido está listo aquí - dejar que el intento de acción se encargue
+    // Esto evita falsos negativos cuando el tab está dormido pero puede despertarse
+    // El código de UNFOLLOW/FOLLOW ya tiene manejo de reintentos si el tab no responde
+    return { available: true };
+  } catch (err) {
+    log("WARN", "Worker check failed", { err: String(err) });
+    return { available: false, reason: "Worker window not found. Please run a scan again." };
+  }
 }
 
 async function sendToTab(tabId, msg, retries = 8) {
@@ -428,14 +600,42 @@ async function ensureUnfollowTab(username) {
   return tabId;
 }
 
+// Listener para detectar cuando se cierra la última ventana de Chrome
+chrome.windows.onRemoved.addListener(async (windowId) => {
+  try {
+    // Verificar si esa era la última ventana de Chrome
+    const allWindows = await chrome.windows.getAll();
+    
+    // Si no quedan ventanas abiertas, limpiar los resultados
+    if (allWindows.length === 0) {
+      await loadState();
+      if (state.lastResult) {
+        log("INFO", "Limpiando resultados al cerrar Chrome", {
+          hadResults: Boolean(state.lastResult),
+        });
+        await setState({
+          lastResult: null,
+          lastResultTimestamp: null,
+          status: "idle",
+          text: "",
+        });
+      }
+    }
+  } catch (err) {
+    log("WARN", "Error al verificar cierre de ventana", { err: String(err) });
+  }
+});
+
 chrome.runtime.onInstalled.addListener(async () => {
   await loadState();
+  await checkAndCleanExpiredResults();
   await saveState();
   log("INFO", "Service worker started", { state });
 });
 
 chrome.runtime.onStartup.addListener(async () => {
   await loadState();
+  await checkAndCleanExpiredResults();
   await saveState();
   log("INFO", "Service worker started (startup)", { state });
 });
@@ -446,8 +646,14 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       if (!msg || !msg.type) return;
 
       if (msg.type === "BG_SCAN_START_DOCKED") {
-        await startScanDocked();
-        sendResponse({ ok: true });
+        try {
+          await startScanDocked();
+          sendResponse({ ok: true });
+        } catch (err) {
+          const errorMsg = String(err?.message || err);
+          log("ERROR", "BG_SCAN_START_DOCKED failed", { error: errorMsg });
+          sendResponse({ ok: false, error: errorMsg });
+        }
         return;
       }
 
@@ -484,12 +690,15 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           return;
         }
 
-        const tabId = state.workerTabId;
-        if (!tabId) {
-          log("ERROR", "UNFOLLOW_NO_WORKER_TAB", { username });
-          sendResponse({ ok: false, error: "Worker not available. Run a scan again." });
+        // Verificar si el worker está disponible, y crearlo si es necesario
+        const workerCheck = await ensureWorkerForAction();
+        if (!workerCheck.available) {
+          log("ERROR", "UNFOLLOW_WORKER_NOT_AVAILABLE", { username, reason: workerCheck.reason });
+          sendResponse({ ok: false, error: workerCheck.reason });
           return;
         }
+
+        const tabId = state.workerTabId;
 
         await setState({
           status: "unfollowing",
@@ -513,13 +722,15 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             res = await sendToTab(tabId, { type: "UNFOLLOW", username });
           }
           const message = res?.message || `Unfollowed @${username}`;
+          const isSuccess = res?.ok === true || message.toLowerCase().includes("already not following");
+          
           await setState({
-            status: "done",
+            status: isSuccess ? "done" : "error",
             text: message,
             unfollow: { ...DEFAULT_UNFOLLOW_STATE },
           });
-          log("INFO", "UNFOLLOW_DONE_BG", { username, ok: Boolean(res?.ok), message });
-          sendResponse({ ok: true, result: res, message });
+          log(isSuccess ? "INFO" : "ERROR", "UNFOLLOW_DONE_BG", { username, ok: isSuccess, message });
+          sendResponse({ ok: isSuccess, result: res, message });
         } catch (err) {
           const message = String(err);
           await setState({
@@ -542,12 +753,15 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           return;
         }
 
-        const tabId = state.workerTabId;
-        if (!tabId) {
-          log("ERROR", "FOLLOW_NO_WORKER_TAB", { username });
-          sendResponse({ ok: false, error: "Worker not available. Run a scan again." });
+        // Verificar si el worker está disponible, y crearlo si es necesario
+        const workerCheck = await ensureWorkerForAction();
+        if (!workerCheck.available) {
+          log("ERROR", "FOLLOW_WORKER_NOT_AVAILABLE", { username, reason: workerCheck.reason });
+          sendResponse({ ok: false, error: workerCheck.reason });
           return;
         }
+
+        const tabId = state.workerTabId;
 
         await setState({
           status: "follow",
@@ -570,13 +784,15 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             res = await sendToTab(tabId, { type: "FOLLOW", username });
           }
           const message = res?.message || `Followed @${username}`;
+          const isSuccess = res?.ok === true || message.toLowerCase().includes("already following");
+          
           await setState({
-            status: "done",
+            status: isSuccess ? "done" : "error",
             text: message,
             follow: { ...DEFAULT_FOLLOW_STATE },
           });
-          log("INFO", "FOLLOW_DONE_BG", { username, ok: Boolean(res?.ok), message });
-          sendResponse({ ok: true, result: res, message });
+          log(isSuccess ? "INFO" : "ERROR", "FOLLOW_DONE_BG", { username, ok: isSuccess, message });
+          sendResponse({ ok: isSuccess, result: res, message });
         } catch (err) {
           const message = String(err);
           await setState({
@@ -640,6 +856,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           status: "done",
           text: "Done.",
           lastResult: msg.result || null,
+          lastResultTimestamp: Date.now(), // Guardar timestamp cuando se generan los resultados
           unfollow: { ...DEFAULT_UNFOLLOW_STATE },
         });
 
@@ -647,6 +864,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           following: msg.result?.following?.length,
           followers: msg.result?.followers?.length,
           noMeSiguen: msg.result?.noMeSiguen?.length,
+          timestamp: Date.now(),
         });
 
         sendResponse({ ok: true });
@@ -680,8 +898,30 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       }
 
       if (msg.type === "GET_STATE") {
-        await loadState();
-        sendResponse({ ok: true, state });
+        try {
+          await loadState();
+          await checkAndCleanExpiredResults();
+          
+          // Agregar información del estado del worker al estado
+          let workerCheck = { available: false, reason: "Unknown error" };
+          try {
+            workerCheck = await checkWorkerAvailable();
+          } catch (err) {
+            log("WARN", "checkWorkerAvailable failed in GET_STATE", { err: String(err) });
+            workerCheck = { available: false, reason: "Worker check failed" };
+          }
+          
+          const stateWithWorker = {
+            ...state,
+            workerAvailable: workerCheck.available,
+            workerReason: workerCheck.reason || null,
+          };
+          
+          sendResponse({ ok: true, state: stateWithWorker });
+        } catch (err) {
+          log("ERROR", "GET_STATE failed", { err: String(err) });
+          sendResponse({ ok: false, error: String(err), state: { ...DEFAULT_STATE } });
+        }
         return;
       }
 

@@ -62,6 +62,25 @@
             We will open an Instagram window on the right. <b>Do not minimize it</b> while it runs. The report is shown here in the popup.
           </div>
 
+          <div class="worker-warning" id="workerWarning" style="display: none;">
+            <div class="worker-warning-icon">⚠️</div>
+            <div class="worker-warning-text" id="workerWarningText">
+              Worker window not available. Please run a scan or restore the worker window.
+            </div>
+          </div>
+
+          <div class="cooldown-warning" id="cooldownWarning" style="display: none;">
+            <div class="cooldown-warning-icon">⏱️</div>
+            <div class="cooldown-warning-content">
+              <div class="cooldown-warning-title">Cooldown Active</div>
+              <div class="cooldown-warning-text" id="cooldownText">
+                To avoid Instagram account limitations, please wait <span id="cooldownCounter">3:00</span> before continuing.
+              </div>
+              <div class="cooldown-warning-reason">
+                Instagram may temporarily restrict accounts that perform too many actions in a short time. This cooldown helps protect your account.
+              </div>
+            </div>
+          </div>
 
           <div class="list" id="noMeSiguenList"></div>
         </section>

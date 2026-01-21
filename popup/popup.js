@@ -20,6 +20,11 @@ const downloadBtn = $("downloadBtn");
 const clearBtn = $("clearBtn");
 
 const closeWorkerBtn = $("closeWorkerBtn");
+const workerWarning = $("workerWarning");
+const workerWarningText = $("workerWarningText");
+const cooldownWarning = $("cooldownWarning");
+const cooldownCounter = $("cooldownCounter");
+const cooldownText = $("cooldownText");
 
 let currentState = null;
 let currentListType = "noMeSiguen"; // noMeSiguen | noSigoYo
@@ -35,6 +40,50 @@ let popupState = {
   tab: "noMeSiguen",
   scrolls: { noMeSiguen: 0, noSigoYo: 0 },
 };
+
+// Contador y cooldown de acciones
+let actionCount = 0; // Contador de FOLLOW/UNFOLLOW
+let cooldownActive = false;
+let cooldownTimer = null;
+let cooldownEndTime = null;
+const ACTION_LIMIT = 17;
+const COOLDOWN_DURATION_MS = 3 * 60 * 1000; // 3 minutos
+const STORAGE_KEY_COOLDOWN = "IGFD_COOLDOWN_STATE";
+
+const STORAGE_KEY_EXCLUDED = "IGFD_EXCLUDED_USERS";
+
+async function saveExcludedUsers() {
+  await chrome.storage.local.set({
+    [STORAGE_KEY_EXCLUDED]: {
+      unfollowed: Array.from(unfollowedLocally),
+      followed: Array.from(followedLocally),
+    }
+  });
+}
+
+async function loadExcludedUsers() {
+  const res = await new Promise((resolve) =>
+    chrome.storage.local.get({ [STORAGE_KEY_EXCLUDED]: { unfollowed: [], followed: [] } }, (r) =>
+      resolve(r[STORAGE_KEY_EXCLUDED] || { unfollowed: [], followed: [] })
+    )
+  );
+  
+  unfollowedLocally.clear();
+  followedLocally.clear();
+  
+  if (Array.isArray(res.unfollowed)) {
+    res.unfollowed.forEach((u) => unfollowedLocally.add(String(u).toLowerCase()));
+  }
+  if (Array.isArray(res.followed)) {
+    res.followed.forEach((u) => followedLocally.add(String(u).toLowerCase()));
+  }
+}
+
+async function clearExcludedUsers() {
+  unfollowedLocally.clear();
+  followedLocally.clear();
+  await chrome.storage.local.remove(STORAGE_KEY_EXCLUDED);
+}
 
 function savePopupState(partial = {}) {
   popupState = {
@@ -72,7 +121,22 @@ function fmtLine(l) {
 
 async function getState() {
   return new Promise((resolve) => {
-    chrome.runtime.sendMessage({ type: "GET_STATE" }, (res) => resolve(res?.state || null));
+    chrome.runtime.sendMessage({ type: "GET_STATE" }, (res) => {
+      if (chrome.runtime.lastError) {
+        console.error("[IGFD] getState error:", chrome.runtime.lastError);
+        // Si hay error, retornar estado vacío en lugar de null
+        resolve({
+          status: "idle",
+          text: "",
+          progress: { phase: "", loaded: 0, total: 0, percent: 0 },
+          lastResult: null,
+          workerAvailable: false,
+          workerReason: "Service worker not available. Please reload the extension.",
+        });
+      } else {
+        resolve(res?.state || null);
+      }
+    });
   });
 }
 
@@ -105,6 +169,118 @@ function setProgressUI(st) {
   barFill.style.width = `${p.percent || 0}%`;
 }
 
+async function saveCooldownState() {
+  await chrome.storage.local.set({
+    [STORAGE_KEY_COOLDOWN]: {
+      actionCount,
+      cooldownActive,
+      cooldownEndTime,
+    }
+  });
+}
+
+async function loadCooldownState() {
+  const res = await new Promise((resolve) =>
+    chrome.storage.local.get({ [STORAGE_KEY_COOLDOWN]: { actionCount: 0, cooldownActive: false, cooldownEndTime: null } }, (r) =>
+      resolve(r[STORAGE_KEY_COOLDOWN] || { actionCount: 0, cooldownActive: false, cooldownEndTime: null })
+    )
+  );
+  
+  actionCount = res.actionCount || 0;
+  cooldownEndTime = res.cooldownEndTime || null;
+  
+  // Verificar si el cooldown ya expiró
+  if (cooldownEndTime && cooldownEndTime > Date.now()) {
+    cooldownActive = true;
+    // Restaurar cooldown activo
+    if (cooldownWarning) {
+      cooldownWarning.style.display = "flex";
+    }
+    updateCooldownCounter();
+    cooldownTimer = setInterval(updateCooldownCounter, 1000);
+    
+    // Calcular tiempo restante y programar fin del cooldown
+    const remaining = cooldownEndTime - Date.now();
+    setTimeout(() => {
+      endCooldown();
+    }, remaining);
+  } else {
+    // El cooldown ya expiró, limpiar estado
+    actionCount = 0;
+    cooldownActive = false;
+    cooldownEndTime = null;
+    await saveCooldownState();
+  }
+}
+
+function startCooldown() {
+  if (cooldownActive) return;
+  
+  cooldownActive = true;
+  cooldownEndTime = Date.now() + COOLDOWN_DURATION_MS;
+  
+  // Guardar estado en storage
+  saveCooldownState();
+  
+  // Mostrar banner de cooldown
+  if (cooldownWarning) {
+    cooldownWarning.style.display = "flex";
+  }
+  
+  // Actualizar contador cada segundo
+  updateCooldownCounter();
+  cooldownTimer = setInterval(updateCooldownCounter, 1000);
+  
+  // Desbloquear después del cooldown
+  setTimeout(() => {
+    endCooldown();
+  }, COOLDOWN_DURATION_MS);
+  
+  // Forzar refresh para deshabilitar botones
+  refreshAll();
+}
+
+function updateCooldownCounter() {
+  if (!cooldownActive || !cooldownEndTime || !cooldownCounter) return;
+  
+  const now = Date.now();
+  const remaining = Math.max(0, cooldownEndTime - now);
+  
+  if (remaining <= 0) {
+    endCooldown();
+    return;
+  }
+  
+  const minutes = Math.floor(remaining / 60000);
+  const seconds = Math.floor((remaining % 60000) / 1000);
+  const formatted = `${minutes}:${seconds.toString().padStart(2, "0")}`;
+  
+  cooldownCounter.textContent = formatted;
+}
+
+async function endCooldown() {
+  if (!cooldownActive) return;
+  
+  cooldownActive = false;
+  actionCount = 0; // Resetear contador
+  cooldownEndTime = null;
+  
+  // Guardar estado en storage
+  await saveCooldownState();
+  
+  if (cooldownTimer) {
+    clearInterval(cooldownTimer);
+    cooldownTimer = null;
+  }
+  
+  if (cooldownWarning) {
+    cooldownWarning.style.display = "none";
+  }
+  
+  // Forzar refresh para habilitar botones
+  refreshAll();
+}
+
 function setStatusUI(st) {
   const s = st?.status || "idle";
   const txt = st?.text || (s === "idle" ? "Ready" : s);
@@ -124,11 +300,25 @@ function renderReport(st) {
   const noMeSiguen = (r?.noMeSiguen || []).filter((u) => !unfollowedLocally.has(u.toLowerCase()));
   const noSigoYo = (r?.noSigoYo || []).filter((u) => !followedLocally.has(u.toLowerCase()));
   const unfollowState = st?.unfollow || { running: false, username: null };
-    const followState = st?.follow || { running: false, username: null };
+  const followState = st?.follow || { running: false, username: null };
   const hint = $("hint");
+
+  // Verificar estado del worker
+  const workerAvailable = st?.workerAvailable !== false; // Por defecto true si no está definido
+  const workerReason = st?.workerReason || null;
 
   if (hint) {
     hint.style.display = r ? "none" : "block";
+  }
+
+  // Mostrar/ocultar aviso del worker
+  if (workerWarning && workerWarningText) {
+    if (!workerAvailable && r) {
+      workerWarning.style.display = "flex";
+      workerWarningText.textContent = workerReason || "Worker window not available. Please run a scan or restore the worker window.";
+    } else {
+      workerWarning.style.display = "none";
+    }
   }
 
   cachedResults = { noMeSiguen, noSigoYo };
@@ -186,7 +376,8 @@ function renderReport(st) {
     const doneLabel = isUnfollowMode ? "Unfollowed" : "Followed";
     const workingLabel = isUnfollowMode ? "Working..." : "Following...";
     actionBtn.textContent = isDone ? doneLabel : isWorking ? workingLabel : isError ? "Error" : baseLabel;
-    actionBtn.disabled = isWorking || isDone || globalRunning;
+    // Deshabilitar botón si el worker no está disponible, está en cooldown (además de las otras condiciones)
+    actionBtn.disabled = isWorking || isDone || globalRunning || !workerAvailable || cooldownActive;
     actionBtn.addEventListener("click", async () => {
       console.log("[IGFD] Action click", { mode: isUnfollowMode ? "UNFOLLOW" : "FOLLOW", username: u });
       setLocalLock(true);
@@ -202,6 +393,20 @@ function renderReport(st) {
         statusMap[u] = "done";
         actionBtn.textContent = doneLabel;
         actionBtn.disabled = true;
+        // Agregar a la lista de excluidos y persistir
+        if (isUnfollowMode) {
+          unfollowedLocally.add(u.toLowerCase());
+        } else {
+          followedLocally.add(u.toLowerCase());
+        }
+        await saveExcludedUsers(); // Persistir cambios inmediatamente
+        
+        // Incrementar contador de acciones y verificar si necesita cooldown
+        actionCount++;
+        await saveCooldownState(); // Guardar contador persistente
+        if (actionCount >= ACTION_LIMIT && !cooldownActive) {
+          startCooldown();
+        }
       } else {
         statusMap[u] = "error";
         actionBtn.textContent = "Error";
@@ -350,8 +555,13 @@ scanBtn.addEventListener("click", async () => {
 
   statusText.textContent = "Starting...";
   chrome.runtime.sendMessage({ type: "BG_SCAN_START_DOCKED" }, async (res) => {
-    if (res?.error) {
+    if (chrome.runtime.lastError) {
+      statusText.textContent = chrome.runtime.lastError.message || "Error starting scan";
+      console.error("[IGFD] Scan error:", chrome.runtime.lastError);
+    } else if (res?.error) {
       statusText.textContent = res.error;
+    } else if (!res?.ok) {
+      statusText.textContent = "Failed to start scan. Please try again.";
     }
     await refreshAll();
     scanBtn.disabled = false;
@@ -384,6 +594,7 @@ clearBtn.addEventListener("click", async () => {
     IGFD_STATE: {
       ...(currentState || {}),
       lastResult: null,
+      lastResultTimestamp: null, // Limpiar también el timestamp
       text: "",
       status: "idle",
       progress: { phase: "", loaded: 0, total: 0, percent: 0 },
@@ -391,9 +602,14 @@ clearBtn.addEventListener("click", async () => {
     }
   });
   unfollowStatuses = {};
-  unfollowedLocally.clear();
   followStatuses = {};
-  followedLocally.clear();
+  actionCount = 0; // Resetear contador de acciones
+  if (cooldownActive) {
+    await endCooldown(); // Terminar cooldown si está activo
+  } else {
+    await saveCooldownState(); // Guardar contador reseteado
+  }
+  await clearExcludedUsers(); // Limpiar también del storage
   await refreshAll();
 });
 
@@ -402,24 +618,44 @@ closeWorkerBtn.addEventListener("click", async () => {
   await refreshAll();
 });
 
-chrome.runtime.onMessage.addListener((msg) => {
+chrome.runtime.onMessage.addListener(async (msg) => {
   if (msg?.type === "UNFOLLOW_COOLDOWN") {
     const text = msg?.message || "Pause unfollows for a few minutes to avoid rate limits.";
     statusText.textContent = text;
   }
   if (msg?.type === "UNFOLLOW_DONE" && msg.ok && msg.username) {
     unfollowedLocally.add(String(msg.username).toLowerCase());
-    refreshAll();
+    await saveExcludedUsers(); // Persistir cambios
+    
+    // Incrementar contador de acciones y verificar si necesita cooldown
+    actionCount++;
+    await saveCooldownState(); // Guardar contador persistente
+    if (actionCount >= ACTION_LIMIT && !cooldownActive) {
+      startCooldown();
+    }
+    
+    await refreshAll();
   }
   if (msg?.type === "FOLLOW_DONE" && msg.ok && msg.username) {
     followedLocally.add(String(msg.username).toLowerCase());
-    refreshAll();
+    await saveExcludedUsers(); // Persistir cambios
+    
+    // Incrementar contador de acciones y verificar si necesita cooldown
+    actionCount++;
+    await saveCooldownState(); // Guardar contador persistente
+    if (actionCount >= ACTION_LIMIT && !cooldownActive) {
+      startCooldown();
+    }
+    
+    await refreshAll();
   }
   console.log("[IGFD] runtime message", msg);
 });
 
 (async () => {
   await loadPopupState();
+  await loadExcludedUsers(); // Cargar usuarios excluidos del storage
+  await loadCooldownState(); // Cargar estado del cooldown y contador persistente
   setupTabs();
   setupChips();
   setupDownload();
